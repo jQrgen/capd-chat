@@ -7,8 +7,10 @@ package org.nexa.capdchat
 fun decodePayload(bytes: ByteArray): String? {
     val text = decodeUtf8(bytes) ?: return null
     if (!isReadable(text)) return null
-    return text
+    return text.replace(BIDI_CONTROLS, "")
 }
+
+private val BIDI_CONTROLS = Regex("[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 
 internal fun isReadable(text: String): Boolean {
     var i = 0
@@ -55,7 +57,7 @@ internal fun decodeUtf8(bytes: ByteArray): String? {
                 if (b1 !in 0x80..0xbf || b2 !in 0x80..0xbf) return null
                 if (b0 == 0xe0 && b1 < 0xa0) return null
                 if (b0 == 0xed && b1 >= 0xa0) return null
-                val code = (b0 and 0x0f) shl 12 or (b1 and 0x3f) shl 6 or (b2 and 0x3f)
+                val code = ((b0 and 0x0f) shl 12) or ((b1 and 0x3f) shl 6) or (b2 and 0x3f)
                 out.append(code.toChar())
                 i += 3
             }
@@ -67,7 +69,7 @@ internal fun decodeUtf8(bytes: ByteArray): String? {
                 if (b1 !in 0x80..0xbf || b2 !in 0x80..0xbf || b3 !in 0x80..0xbf) return null
                 if (b0 == 0xf0 && b1 < 0x90) return null
                 if (b0 == 0xf4 && b1 >= 0x90) return null
-                val code = (b0 and 0x07) shl 18 or (b1 and 0x3f) shl 12 or (b2 and 0x3f) shl 6 or (b3 and 0x3f)
+                val code = ((b0 and 0x07) shl 18) or ((b1 and 0x3f) shl 12) or ((b2 and 0x3f) shl 6) or (b3 and 0x3f)
                 if (code > 0x10ffff) return null
                 val shifted = code - 0x10000
                 out.append(((shifted ushr 10) + 0xD800).toChar())

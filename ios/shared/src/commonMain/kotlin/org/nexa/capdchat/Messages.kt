@@ -44,6 +44,13 @@ internal object Net {
     const val QUERY_MAX_HASHES = 2000
     /** Smallest CapdMsg on the wire: fields, time, bits, empty nonce, empty data. */
     const val MIN_CAPD_MSG = 15
+    const val MAX_CAPD_DATA = 64 * 1024
+    const val MAX_FUTURE_SEC = 120L
+    const val MAX_MSG_VECTOR = 500
+    const val HANDSHAKE_TIMEOUT_SEC = 20L
+    const val IDLE_PING_SEC = 120L
+    const val IDLE_TIMEOUT_SEC = 300L
+    const val MAX_PARSE_FAILURES = 3
     const val EXT_VERSION_KEY = 0uL
     const val EXT_VERSION_VALUE = 100uL
     const val BU_IGNORE_CHECKSUM = 0x0000000200000002uL
@@ -202,7 +209,7 @@ internal fun decodeCapd(reader: Reader, nowSeconds: Long): DecodedCapd {
     val nonce = reader.vector(64)
     val expiration = if (fields and 1 != 0) reader.u16() else NEVER_EXPIRE
     val rescind = if (fields and 2 != 0) reader.bytes(20) else null
-    val data = reader.vector(256 * 1024)
+    val data = reader.vector(Net.MAX_CAPD_DATA)
     val body = CapdBody(
         createTime = created,
         expiration = if (expiration == NEVER_EXPIRE) null else expiration,
@@ -229,9 +236,8 @@ internal fun decodeCapd(reader: Reader, nowSeconds: Long): DecodedCapd {
 
 internal fun decodeCapdVector(payload: ByteArray, nowSeconds: Long): List<DecodedCapd> {
     val reader = Reader(payload)
-    val count = reader.compact()
-    if (count > 500u) throw WireException("CAPD message vector is too large")
-    return List(count.toInt()) { decodeCapd(reader, nowSeconds) }
+    val count = boundedCount(reader.compact(), Net.MAX_MSG_VECTOR, reader.remaining(), Net.MIN_CAPD_MSG)
+    return List(count) { decodeCapd(reader, nowSeconds) }
 }
 
 internal fun encodeQuery(cookie: Long, type: Int, start: Long, quantity: Long, content: ByteArray): ByteArray =
@@ -305,10 +311,30 @@ internal fun decodeInv(payload: ByteArray): List<ByteArray> {
     val reader = Reader(payload)
     val type = reader.compact()
     if (type != Net.CAPD_MSG_TYPE.toULong()) return emptyList()
-    val count = reader.compact()
-    if (count > 2000u) throw WireException("capdinv is too large")
-    return List(count.toInt()) { reader.bytes(32) }
+    val count = boundedCount(reader.compact(), Net.QUERY_MAX_HASHES, reader.remaining(), 32)
+    return List(count) { reader.bytes(32) }
 }
+
+/** Proof of work meets its own target, the payload is within size, and the message is current. */
+internal fun capdAcceptable(
+    hash: String,
+    difficultyBits: Long,
+    created: Long,
+    expiration: Int?,
+    size: Int,
+    dataHex: String,
+    nowSeconds: Long,
+): Boolean {
+    if (size < 0 || size > Net.MAX_CAPD_DATA || dataHex.length != size * 2) return false
+    if (created > nowSeconds + Net.MAX_FUTURE_SEC) return false
+    if (expiration != null && created + expiration < nowSeconds) return false
+    val target = compactTargetHex(difficultyBits)
+    if (hash.length != 64 || target.all { it == '0' }) return false
+    return hash.lowercase() <= target
+}
+
+internal fun DecodedCapd.acceptable(nowSeconds: Long) =
+    capdAcceptable(hash, difficultyBits, created, expiration, size, data, nowSeconds)
 
 internal fun decodeInfo(payload: ByteArray): Triple<Double, Double, Double>? {
     if (payload.size < 24) return null

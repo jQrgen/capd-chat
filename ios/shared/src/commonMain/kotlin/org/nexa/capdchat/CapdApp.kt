@@ -10,11 +10,12 @@ import kotlinx.serialization.json.Json
 class CapdApp {
     private val archive = ChatArchive()
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
-    private var peer: CapdPeer? = null
+    private val peers = HashMap<String, CapdPeer>()
+    private val archiveServer = HashMap<String, String>()
 
     fun archiveJson(): String = archive.encode()
 
-    fun loadArchive(json: String): Boolean = archive.load(json)
+    fun loadArchive(json: String, nowMs: Long): Boolean = archive.load(json, nowMs)
 
     fun showDemo(nowMs: Long) {
         archive.loadDemo(nowMs)
@@ -22,6 +23,10 @@ class CapdApp {
 
     fun clearServer(server: String) {
         archive.clear(server)
+    }
+
+    fun setKept(server: String, hash: String, kept: Boolean) {
+        archive.setKept(server, hash, kept)
     }
 
     fun markOffline(server: String) {
@@ -34,28 +39,49 @@ class CapdApp {
 
     fun latestServer(): String = archive.latestServer()
 
-    fun open(network: String, serverId: String, peerPort: Int, prefixHex: String, seed: Int, nowSeconds: Long): Ingest {
+    /** [peerId] names one socket; several peers can feed the same archive [server]. */
+    fun open(
+        network: String,
+        server: String,
+        peerId: String,
+        peerPort: Int,
+        prefixHex: String,
+        seed: Int,
+        nowSeconds: Long,
+    ): Ingest {
         val created = try {
-            CapdPeer(network, serverId, peerPort, prefixHex, seed)
+            CapdPeer(network, peerId, peerPort, prefixHex, seed)
         } catch (error: WireException) {
-            peer = null
+            peers.remove(peerId)
             return Ingest("", "failed", error.message ?: "Could not open a peer.", -1, "", 0)
         }
-        peer = created
+        peers[peerId] = created
+        archiveServer[peerId] = server
         val frames = created.start(nowSeconds)
         return Ingest(frames.joinToString("\n") { hexEncode(it) }, created.phase, created.note, -1, "", 0)
     }
 
-    fun ingest(hexChunk: String, nowSeconds: Long, nowMs: Long): Ingest {
-        val current = peer ?: return Ingest("", "failed", "Not connected.", -1, "", 0)
+    fun ingest(peerId: String, hexChunk: String, nowSeconds: Long, nowMs: Long): Ingest {
+        val current = peers[peerId] ?: return Ingest("", "failed", "Not connected.", -1, "", 0)
         val bytes = hexDecode(hexChunk) ?: return Ingest("", "failed", "The phone passed malformed bytes.", -1, "", 0)
         val step = current.receive(bytes, nowSeconds)
-        step.messages.forEach { archive.accept(it, current.serverId, nowMs) }
+        val server = archiveServer[peerId] ?: peerId
+        step.messages.forEach { archive.accept(it, server, nowMs) }
         return ingestOf(step)
     }
 
-    fun setPrefix(prefixHex: String, nowSeconds: Long): Ingest {
-        val current = peer ?: return Ingest("", "idle", "", -1, "", 0)
+    fun tick(peerId: String, nowSeconds: Long): Ingest {
+        val current = peers[peerId] ?: return Ingest("", "failed", "Not connected.", -1, "", 0)
+        return ingestOf(current.tick(nowSeconds))
+    }
+
+    fun close(peerId: String) {
+        peers.remove(peerId)
+        archiveServer.remove(peerId)
+    }
+
+    fun setPrefix(peerId: String, prefixHex: String, nowSeconds: Long): Ingest {
+        val current = peers[peerId] ?: return Ingest("", "idle", "", -1, "", 0)
         return ingestOf(current.updatePrefix(prefixHex, nowSeconds))
     }
 

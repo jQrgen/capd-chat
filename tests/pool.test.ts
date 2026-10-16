@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { departedHashes, mergePulled, parseCapdInfo, parseCapdList, parseCapdMessage, planFetch, pullPool, snapshotIsComplete, stampMessage } from "../src/pool";
+import { capStored, MAX_LIST, departedHashes, mergePulled, parseCapdInfo, parseCapdList, parseCapdMessage, planFetch, pullPool, snapshotIsComplete, stampMessage } from "../src/pool";
 import type { StoredMessage } from "../src/types";
 
 const HASH_A = "aa".repeat(32);
@@ -33,6 +33,21 @@ describe("CAPD response parsing", () => {
     expect(forever.ok).toBe(true);
     if (!forever.ok) return;
     expect(forever.message.expiration).toBeUndefined();
+  });
+
+  it("rejects out-of-range created and caps the list", () => {
+    expect(parseCapdMessage({ ...sample, created: 5 }).ok).toBe(false);
+    expect(parseCapdMessage({ ...sample, created: 1_700_000_500 }, 1_700_000_000).ok).toBe(false);
+    expect(parseCapdList(Array(MAX_LIST + 5).fill(HASH_A))).toHaveLength(MAX_LIST);
+  });
+
+  it("keeps the same hash from two servers apart and caps storage", () => {
+    const base = (parseCapdMessage(sample) as { ok: true; message: Omit<StoredMessage, "inPool" | "server" | "origin" | "firstSeen" | "lastSeen"> }).message;
+    const merged = mergePulled([stampMessage(base, "wss://a", 1)], [stampMessage(base, "wss://b", 2)], null, 2);
+    expect(merged.map((message) => message.server).sort()).toEqual(["wss://a", "wss://b"]);
+    const { kept, dropped } = capStored(merged, 1);
+    expect(kept).toHaveLength(1);
+    expect(dropped[0]?.server).toBe("wss://a");
   });
 
   it("parses info and a lowest-to-highest hash list", () => {

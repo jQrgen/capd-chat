@@ -2,6 +2,7 @@ package org.nexa.capdchat
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -64,6 +65,8 @@ class ProtocolTest {
         assertNull(decodePayload(byteArrayOf(0xc0.toByte(), 0x80.toByte())))
         assertNull(decodePayload(byteArrayOf(0x00)))
         assertEquals("a\nb", decodePayload("a\nb".encodeToByteArray()))
+        assertEquals("€😀", decodePayload("€😀".encodeToByteArray()))
+        assertEquals("ab", decodePayload("a\u202eb".encodeToByteArray()))
     }
 
     @Test
@@ -115,7 +118,7 @@ class ProtocolTest {
             data = "hello pool".encodeToByteArray(),
             difficultyBits = 0x1e0fffff,
             nonce = byteArrayOf(9),
-        )
+        ).mined()
         val wireHash = hexDecode(capdHash(body))!!.reversedArray()
         val inv = frame(
             Net.MAINNET_MAGIC,
@@ -228,6 +231,54 @@ class ProtocolTest {
         finish(peer)
         val step = peer.updatePrefix("zz", 10)
         assertTrue(step.note.contains("hex"))
+    }
+
+    @Test
+    fun capdWaitsForTheFullHandshake() {
+        val peer = CapdPeer("mainnet", "seed:7228", 7228, seed = 5)
+        peer.start(10)
+        val early = peer.receive(frame(Net.MAINNET_MAGIC, Net.VERACK, 1, ByteArray(0)), 10)
+        assertEquals("handshake", early.phase)
+        assertTrue(early.send.isEmpty())
+        assertEquals("failed", peer.tick(10 + Net.HANDSHAKE_TIMEOUT_SEC + 1).phase)
+    }
+
+    @Test
+    fun idlePeerIsPingedThenDropped() {
+        val peer = CapdPeer("mainnet", "seed:7228", 7228, seed = 6)
+        finish(peer)
+        assertEquals(Net.PING, commandOf(peer.tick(10 + Net.IDLE_PING_SEC + 1).send.single()))
+        assertEquals("failed", peer.tick(10 + Net.IDLE_TIMEOUT_SEC + 1).phase)
+    }
+
+    @Test
+    fun repeatedMalformedMessagesDropThePeer() {
+        val peer = CapdPeer("mainnet", "seed:7228", 7228, seed = 7)
+        finish(peer)
+        val bad = frame(Net.MAINNET_MAGIC, Net.CAPDMSG, 2, Buf().apply { compact(9u) }.toByteArray())
+        repeat(Net.MAX_PARSE_FAILURES - 1) { assertEquals("listening", peer.receive(bad, 10).phase) }
+        assertEquals("failed", peer.receive(bad, 10).phase)
+    }
+
+    @Test
+    fun messagesWithoutWorkOrPastExpiryAreDropped() {
+        val good = CapdBody(1_700_000_000, 60, null, "x".encodeToByteArray(), 0x1e0fffff, byteArrayOf(0)).mined()
+        val decoded = decodeCapd(Reader(encodeCapd(good)), 1_700_000_010)
+        assertTrue(decoded.acceptable(1_700_000_010))
+        assertFalse(decoded.acceptable(1_700_000_061))
+        assertFalse(decoded.acceptable(1_700_000_000 - Net.MAX_FUTURE_SEC - 1))
+        assertFalse(decoded.copy(hash = "f".repeat(64)).acceptable(1_700_000_010))
+        assertFalse(decoded.copy(size = 2).acceptable(1_700_000_010))
+    }
+
+    private fun CapdBody.mined(): CapdBody {
+        val target = compactTargetHex(difficultyBits)
+        var n = 0
+        while (true) {
+            val candidate = copy(nonce = byteArrayOf((n shr 16).toByte(), (n shr 8).toByte(), n.toByte()))
+            if (capdHash(candidate) <= target) return candidate
+            n++
+        }
     }
 
     private fun finish(peer: CapdPeer) {

@@ -7,6 +7,10 @@ describe("decodePayload", () => {
     expect(decodePayload(hex)).toEqual({ text: "Grüß\n🌤", byteLength: new TextEncoder().encode("Grüß\n🌤").length });
   });
 
+  it("strips bidi control characters", () => {
+    expect(decodePayload(utf8ToHex("a\u202eb\u2066c"))?.text).toBe("abc");
+  });
+
   it("shows an empty payload as empty text", () => {
     expect(decodePayload("")).toEqual({ text: "", byteLength: 0 });
   });

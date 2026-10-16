@@ -44,17 +44,29 @@ class ArchiveTest {
         archive.accept(sample("stay"), "peer", 5_000)
         archive.markOffline("peer")
         val copy = ChatArchive()
-        assertTrue(copy.load(archive.encode()))
+        assertTrue(copy.load(archive.encode(), 5_000))
         val message = copy.visible("peer", "stay", "text", "kept").single()
         assertEquals("stay", message.text)
-        assertFalse(copy.load("{"))
+        assertFalse(copy.load("{", 5_000))
+    }
+
+    @Test
+    fun expiredOrUnprovenCopiesAreDroppedUnlessKept() {
+        val archive = ChatArchive()
+        archive.accept(sample("bad").copy(hash = "f".repeat(64)), "peer", 1_000)
+        assertTrue(archive.visible("peer", "", "all", "all").isEmpty())
+        archive.accept(sample("short").copy(expiration = 60), "peer", 1_000)
+        archive.accept(sample("keep").copy(expiration = 60), "peer", 1_000)
+        archive.setKept("peer", sample("keep").hash, true)
+        archive.prune(120_000)
+        assertEquals("keep", archive.visible("peer", "", "all", "all").single().text)
     }
 
     private fun sample(text: String): DecodedCapd {
         val data = text.encodeToByteArray()
         return DecodedCapd(
-            hash = hexEncode(Sha256.hash(data)),
-            created = 1_700_000_000,
+            hash = "00000000" + hexEncode(Sha256.hash(data)).drop(8),
+            created = 0,
             expiration = null,
             difficultyBits = 0x1e0fffff,
             priority = 8.0,

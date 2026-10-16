@@ -23,6 +23,7 @@ data class StoredCapd(
     val origin: String,
     val firstSeen: Long,
     val lastSeen: Long,
+    val kept: Boolean = false,
 )
 
 @Serializable
@@ -40,6 +41,7 @@ class ChatArchive {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     fun accept(message: DecodedCapd, server: String, nowMs: Long) {
+        if (!message.acceptable(nowMs / 1000)) return
         val index = messages.indexOfFirst { it.hash == message.hash && it.server == server }
         if (index >= 0) {
             val prior = messages[index]
@@ -78,6 +80,27 @@ class ChatArchive {
                 lastSeen = nowMs,
             ),
         )
+        prune(nowMs)
+    }
+
+    fun setKept(server: String, hash: String, kept: Boolean) {
+        val index = messages.indexOfFirst { it.hash == hash && it.server == server }
+        if (index >= 0) messages[index] = messages[index].copy(kept = kept)
+    }
+
+    /** Drops invalid and expired copies (unless kept), then the oldest beyond [MAX_STORED]. */
+    fun prune(nowMs: Long) {
+        val now = nowMs / 1000
+        messages.removeAll { it.server != DEMO_SERVER && !valid(it, now) }
+        if (messages.size > MAX_STORED) {
+            val drop = messages.filter { !it.kept }.sortedBy { it.lastSeen }.take(messages.size - MAX_STORED).toSet()
+            messages.removeAll { it in drop }
+        }
+    }
+
+    private fun valid(m: StoredCapd, now: Long): Boolean {
+        val expiration = if (m.kept) null else m.expiration
+        return capdAcceptable(m.hash, m.difficultyBits, m.created, expiration, m.size, m.data, now)
     }
 
     fun markOffline(server: String) {
@@ -106,11 +129,12 @@ class ChatArchive {
 
     fun encode(): String = json.encodeToString(ArchiveSnapshot(messages = messages.toList()))
 
-    fun load(text: String): Boolean {
+    fun load(text: String, nowMs: Long): Boolean {
         return try {
             val snapshot = json.decodeFromString<ArchiveSnapshot>(text)
             messages.clear()
             messages.addAll(snapshot.messages)
+            prune(nowMs)
             true
         } catch (_: Exception) {
             false
@@ -174,5 +198,6 @@ class ChatArchive {
 
     companion object {
         const val DEMO_SERVER = "demo"
+        const val MAX_STORED = 5000
     }
 }

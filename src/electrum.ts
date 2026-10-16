@@ -222,9 +222,12 @@ export async function negotiateVersion(client: ElectrumClient): Promise<string> 
  * Notification params are unspecified: MR !544 does not register `capd.subscribe`.
  * Accept a hash, a list of hashes, or a `capd.get` object wherever they appear.
  */
+export const MAX_NOTIFY_HASHES = 50;
+
 export function hashesFromNotification(params: unknown[]): string[] {
   const hashes: string[] = [];
   const visit = (value: unknown): void => {
+    if (hashes.length >= MAX_NOTIFY_HASHES) return;
     if (typeof value === "string") {
       if (/^[0-9a-fA-F]{64}$/.test(value)) hashes.push(value.toLowerCase());
       return;

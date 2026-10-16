@@ -5,6 +5,13 @@ import type { CapdInfo, StoredMessage } from "./types";
 export const FETCH_CAP = 200;
 export const FETCH_CONCURRENCY = 6;
 const NEVER_EXPIRES = 65535;
+export const MAX_LIST = 10_000;
+export const MAX_STORED = 5_000;
+export const MAX_DATA_BYTES = 64 * 1024;
+const MIN_CREATED = 1_577_836_800;
+const MAX_FUTURE_SEC = 120;
+
+export const messageKey = (message: Pick<StoredMessage, "server" | "hash">): string => `${message.server} ${message.hash}`;
 
 export type CapdRpc = {
   info(): Promise<unknown>;
@@ -60,7 +67,7 @@ export function parseCapdInfo(value: unknown): CapdInfo | null {
 export function parseCapdList(value: unknown): string[] | null {
   if (!Array.isArray(value)) return null;
   const hashes: string[] = [];
-  for (const entry of value) {
+  for (const entry of value.slice(-MAX_LIST)) {
     if (typeof entry !== "string" || !isMessageHash(entry)) return null;
     hashes.push(entry.toLowerCase());
   }
@@ -78,7 +85,7 @@ function hexField(record: Record<string, unknown>, key: string, minChars: number
   return value.toLowerCase();
 }
 
-export function parseCapdMessage(value: unknown): ParseMessageResult {
+export function parseCapdMessage(value: unknown, nowSec = Date.now() / 1000): ParseMessageResult {
   if (!value || typeof value !== "object") return { ok: false, reason: "message is not an object" };
   const record = value as Record<string, unknown>;
   if (typeof record.hash !== "string" || !isMessageHash(record.hash)) {
@@ -86,6 +93,7 @@ export function parseCapdMessage(value: unknown): ParseMessageResult {
   }
   const created = integerNumber(record.created);
   if (created === null) return { ok: false, reason: "created is missing" };
+  if (created < MIN_CREATED || created > nowSec + MAX_FUTURE_SEC) return { ok: false, reason: "created is out of range" };
   const difficultyBits = integerNumber(record.difficultyBits);
   if (difficultyBits === null || difficultyBits > 0xffffffff) {
     return { ok: false, reason: "difficultyBits is missing" };
@@ -97,12 +105,12 @@ export function parseCapdMessage(value: unknown): ParseMessageResult {
   }
   const powTarget = hexField(record, "powTarget", 2, 64);
   const nonce = hexField(record, "nonce", 0, 1024);
-  const data = hexField(record, "data", 0, 256 * 1024 * 2);
+  const data = hexField(record, "data", 0, MAX_DATA_BYTES * 2);
   if (!powTarget || nonce === null || data === null) {
     return { ok: false, reason: "hex fields are invalid" };
   }
   const size = integerNumber(record.size);
-  if (size === null) return { ok: false, reason: "size is missing" };
+  if (size === null || size > MAX_DATA_BYTES * 4) return { ok: false, reason: "size is invalid" };
 
   let expiration: number | undefined;
   if ("expiration" in record && record.expiration !== null && record.expiration !== undefined) {
@@ -246,11 +254,12 @@ export function mergePulled(
   pulled: readonly StoredMessage[],
   departed: readonly string[] | null,
   nowMs: number,
+  server?: string,
 ): StoredMessage[] {
-  const byHash = new Map(existing.map((message) => [message.hash, message]));
+  const byKey = new Map(existing.map((message) => [messageKey(message), message]));
   for (const message of pulled) {
-    const previous = byHash.get(message.hash);
-    byHash.set(message.hash, {
+    const previous = byKey.get(messageKey(message));
+    byKey.set(messageKey(message), {
       ...message,
       origin: previous?.origin ?? message.origin,
       firstSeen: previous?.firstSeen ?? message.firstSeen,
@@ -260,11 +269,20 @@ export function mergePulled(
   }
   if (departed) {
     const gone = new Set(departed);
-    for (const [hash, message] of byHash) {
-      if (gone.has(hash) && message.inPool) {
-        byHash.set(hash, { ...message, inPool: false, lastSeen: nowMs });
+    for (const [key, message] of byKey) {
+      if (gone.has(message.hash) && message.inPool && (server === undefined || message.server === server)) {
+        byKey.set(key, { ...message, inPool: false, lastSeen: nowMs });
       }
     }
   }
-  return [...byHash.values()];
+  return [...byKey.values()];
+}
+
+/** Keeps at most `max` messages, dropping the longest-unseen ones that left the pool first. */
+export function capStored(messages: readonly StoredMessage[], max = MAX_STORED): { kept: StoredMessage[]; dropped: StoredMessage[] } {
+  if (messages.length <= max) return { kept: [...messages], dropped: [] };
+  const order = [...messages].sort((a, b) => Number(a.inPool) - Number(b.inPool) || a.lastSeen - b.lastSeen);
+  const dropped = order.slice(0, messages.length - max);
+  const gone = new Set(dropped);
+  return { kept: messages.filter((message) => !gone.has(message)), dropped };
 }
