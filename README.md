@@ -58,3 +58,9 @@ npm run dev
 `.github/workflows/pages.yml` runs the tests and build on every pull request. A push to `main` uploads `dist/` and deploys it with GitHub Pages. In the repository settings, set Pages to **GitHub Actions**.
 
 The hosted page is HTTPS, so a custom server URL has to be `wss://`.
+
+## iPhone app
+
+`ios/` is a separate listen-only Nexa peer. It does not use Rostrum or change this website. The shared Kotlin module speaks CAPD on the P2P network, and the SwiftUI app shows the same kind of feed with a file archive on the phone. Listening runs while the app is open.
+
+Build, test, and TestFlight steps are in [ios/README.md](ios/README.md). `cd ios && ./gradlew :shared:jvmTest` runs the protocol tests. The Xcode archive has to be made on a Mac.
