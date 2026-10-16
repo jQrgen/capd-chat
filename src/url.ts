@@ -1,3 +1,12 @@
+import { NEXA_ROSTRUM, NORDIC_ROSTRUM, type ServerPreset } from "./types";
+
+/** Built-in server for a preset. Custom and demo have no fixed URL. */
+export function presetServerUrl(preset: ServerPreset): string | null {
+  if (preset === "nordic") return NORDIC_ROSTRUM;
+  if (preset === "nexa") return NEXA_ROSTRUM;
+  return null;
+}
+
 /**
  * Accept a ws/wss URL, or a host with an optional port.
  * A bare host uses Nexa mainnet's secure WebSocket port, 20004.

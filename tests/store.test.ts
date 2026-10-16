@@ -59,5 +59,7 @@ describe("settings", () => {
     expect(loadSettings(storage)).toEqual(settings);
     storage.setItem("capd-chat.settings", "{");
     expect(loadSettings(storage).preset).toBe("demo");
+    saveSettings({ ...settings, preset: "nordic", serverUrl: "wss://electrum-nexa.nordiccrypto.no:20004" }, storage);
+    expect(loadSettings(storage).preset).toBe("nordic");
   });
 });

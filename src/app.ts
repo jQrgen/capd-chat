@@ -6,8 +6,8 @@ import { formatBytes, formatClock, formatDay, formatDifficulty, formatExpiration
 import { mergePulled, parseCapdMessage, pullPool, stampMessage, type CapdRpc } from "./pool";
 import { POLL_MS, RECONCILE_MS, statusCopy, type LinkState } from "./status";
 import { loadSettings, saveSettings, type MessageStore } from "./store";
-import { DEMO_SERVER, NEXA_ROSTRUM, type CapdInfo, type ServerPreset, type Settings, type StoredMessage } from "./types";
-import { normalizeServerUrl, pageRequiresSecureSocket } from "./url";
+import { DEMO_SERVER, type CapdInfo, type ServerPreset, type Settings, type StoredMessage } from "./types";
+import { normalizeServerUrl, pageRequiresSecureSocket, presetServerUrl } from "./url";
 
 const DEMO_TICK_MS = 9_000;
 
@@ -38,6 +38,7 @@ export class ChatApp {
   private software = "";
 
   private readonly presetSelect: HTMLSelectElement;
+  private readonly presetNote: HTMLElement;
   private readonly urlInput: HTMLInputElement;
   private readonly customRow: HTMLElement;
   private readonly actionButton: HTMLButtonElement;
@@ -74,6 +75,7 @@ export class ChatApp {
       return node as T;
     };
     this.presetSelect = q("#preset");
+    this.presetNote = q("#preset-note");
     this.urlInput = q("#server-url");
     this.customRow = q("#custom-row");
     this.actionButton = q("#connect-btn");
@@ -195,7 +197,7 @@ export class ChatApp {
 
   private readForm(): { preset: ServerPreset; customUrl: string } {
     const value = this.presetSelect.value;
-    const preset: ServerPreset = value === "nexa" || value === "custom" ? value : "demo";
+    const preset: ServerPreset = value === "nordic" || value === "nexa" || value === "custom" ? value : "demo";
     return { preset, customUrl: this.urlInput.value };
   }
 
@@ -205,7 +207,7 @@ export class ChatApp {
     | { kind: "invalid"; error: string } {
     const form = this.readForm();
     if (form.preset === "demo") return { kind: "demo" };
-    const raw = form.preset === "nexa" ? NEXA_ROSTRUM : form.customUrl;
+    const raw = presetServerUrl(form.preset) ?? form.customUrl;
     const url = normalizeServerUrl(raw);
     if (!url) return { kind: "invalid", error: "Enter a WebSocket URL, such as wss://host:20004." };
     if (pageRequiresSecureSocket() && url.startsWith("ws://")) {
@@ -618,6 +620,9 @@ export class ChatApp {
     const detail = this.syncing && this.link.kind !== "connecting" ? `${copy.detail} Updating…` : copy.detail;
     this.statusDetail.textContent = detail;
     this.customRow.hidden = this.presetSelect.value !== "custom";
+    const presetUrl = this.readForm().preset === "nordic" ? presetServerUrl("nordic") : null;
+    this.presetNote.hidden = presetUrl === null;
+    this.presetNote.textContent = presetUrl ?? "";
     const demoRunning = this.link.kind === "demo" && this.presetSelect.value === "demo";
     const live = this.selectionIsLive();
     this.actionButton.disabled = demoRunning;
@@ -906,9 +911,11 @@ const SHELL = `
       <label for="preset">Server</label>
       <select id="preset">
         <option value="demo">Demo pool</option>
+        <option value="nordic">Nordic Crypto</option>
         <option value="nexa">electrum.nexa.org:20004</option>
         <option value="custom">Custom WebSocket</option>
       </select>
+      <p id="preset-note" class="hint" hidden></p>
       <div id="custom-row" hidden>
         <label for="server-url">WebSocket URL</label>
         <input id="server-url" name="server" spellcheck="false" autocomplete="off" placeholder="wss://host:20004" />

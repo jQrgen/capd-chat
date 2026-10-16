@@ -160,6 +160,7 @@ button.texty {
 button.tiny { padding: 0.28rem 0.65rem; font-size: 0.78rem; }
 
 #connect-btn { margin-top: 0.35rem; }
+#preset-note { overflow-wrap: anywhere; font-family: var(--mono); font-size: 0.75rem; }
 
 dl { display: grid; grid-template-columns: 1fr auto; gap: 0.28rem 0.8rem; margin: 0; }
 dt { color: var(--faint); font-size: 0.86rem; }

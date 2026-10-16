@@ -96,7 +96,10 @@ export function loadSettings(storage: Storage | null = safeLocalStorage()): Sett
     const raw = storage.getItem(SETTINGS_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw) as Partial<Settings>;
-    const preset = parsed.preset === "nexa" || parsed.preset === "custom" || parsed.preset === "demo" ? parsed.preset : "demo";
+    const preset =
+      parsed.preset === "nordic" || parsed.preset === "nexa" || parsed.preset === "custom" || parsed.preset === "demo"
+        ? parsed.preset
+        : "demo";
     const active = parsed.active === "server" ? "server" : "demo";
     return {
       preset,

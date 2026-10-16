@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { normalizeServerUrl } from "../src/url";
+import { NORDIC_ROSTRUM } from "../src/types";
+import { normalizeServerUrl, presetServerUrl } from "../src/url";
+
+describe("presetServerUrl", () => {
+  it("points Nordic Crypto and the public Nexa server at their WebSocket URLs", () => {
+    expect(presetServerUrl("nordic")).toBe("wss://electrum-nexa.nordiccrypto.no:20004");
+    expect(presetServerUrl("nordic")).toBe(NORDIC_ROSTRUM);
+    expect(presetServerUrl("nexa")).toBe("wss://electrum.nexa.org:20004");
+    expect(presetServerUrl("demo")).toBeNull();
+    expect(presetServerUrl("custom")).toBeNull();
+  });
+});
 
 describe("normalizeServerUrl", () => {
   it("defaults a bare host to Nexa mainnet WSS", () => {
