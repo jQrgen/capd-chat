@@ -1,20 +1,25 @@
 import type { Settings, StoredMessage } from "./types";
 import { DEFAULT_SETTINGS, SETTINGS_KEY } from "./types";
+import { messageKey } from "./pool";
 
 export interface MessageStore {
   getAll(): Promise<StoredMessage[]>;
   putMany(messages: StoredMessage[]): Promise<void>;
+  deleteMany(messages: StoredMessage[]): Promise<void>;
   clearAll(): Promise<void>;
 }
 
 export function memoryStore(seed: StoredMessage[] = []): MessageStore {
-  const messages = new Map<string, StoredMessage>(seed.map((message) => [message.hash, structuredClone(message)]));
+  const messages = new Map<string, StoredMessage>(seed.map((message) => [messageKey(message), structuredClone(message)]));
   return {
     async getAll() {
       return [...messages.values()].map((message) => structuredClone(message));
     },
     async putMany(next) {
-      for (const message of next) messages.set(message.hash, structuredClone(message));
+      for (const message of next) messages.set(messageKey(message), structuredClone(message));
+    },
+    async deleteMany(gone) {
+      for (const message of gone) messages.delete(messageKey(message));
     },
     async clearAll() {
       messages.clear();
@@ -27,10 +32,19 @@ const DB_STORE = "messages";
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 1);
+    const request = indexedDB.open(DB_NAME, 2);
     request.onupgradeneeded = () => {
       const db = request.result;
-      if (!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE, { keyPath: "hash" });
+      const create = (rows: StoredMessage[]) => {
+        const store = db.createObjectStore(DB_STORE, { keyPath: ["server", "hash"] });
+        for (const row of rows) store.put(row);
+      };
+      if (!db.objectStoreNames.contains(DB_STORE)) return void create([]);
+      const old = request.transaction!.objectStore(DB_STORE).getAll();
+      old.onsuccess = () => {
+        db.deleteObjectStore(DB_STORE);
+        create(old.result as StoredMessage[]);
+      };
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("IndexedDB failed to open"));
@@ -65,6 +79,17 @@ export function indexedDbStore(): MessageStore {
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error ?? new Error("IndexedDB write failed"));
         tx.onabort = () => reject(tx.error ?? new Error("IndexedDB write aborted"));
+      });
+    },
+    async deleteMany(messages) {
+      if (messages.length === 0) return;
+      const database = await db();
+      await new Promise<void>((resolve, reject) => {
+        const tx = database.transaction(DB_STORE, "readwrite");
+        const store = tx.objectStore(DB_STORE);
+        for (const message of messages) store.delete([message.server, message.hash]);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error ?? new Error("IndexedDB delete failed"));
       });
     },
     async clearAll() {

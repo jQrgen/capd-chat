@@ -3,13 +3,14 @@ import { demoInfo, demoSeed, localDemoMessage, nextDemoMessage } from "./demo";
 import { ElectrumClient, ElectrumError, connectElectrum, hashesFromNotification, isMethodMissing, negotiateVersion } from "./electrum";
 import { visibleMessages, type KindFilter, type PresenceFilter } from "./filter";
 import { formatBytes, formatClock, formatDay, formatDifficulty, formatExpiration, formatHexPreview, formatPriority, formatRelative, serverLabel, shortHash } from "./format";
-import { mergePulled, parseCapdMessage, pullPool, stampMessage, type CapdRpc } from "./pool";
+import { capStored, mergePulled, parseCapdMessage, pullPool, stampMessage, type CapdRpc } from "./pool";
 import { POLL_MS, RECONCILE_MS, statusCopy, type LinkState } from "./status";
 import { loadSettings, saveSettings, type MessageStore } from "./store";
 import { DEMO_SERVER, NEXA_ROSTRUM, type CapdInfo, type ServerPreset, type Settings, type StoredMessage } from "./types";
 import { normalizeServerUrl, pageRequiresSecureSocket } from "./url";
 
 const DEMO_TICK_MS = 9_000;
+const MAX_NOTIFY_FETCHES = 2;
 
 export class ChatApp {
   private settings: Settings = loadSettings();
@@ -29,6 +30,7 @@ export class ChatApp {
   private scrollTicket = 0;
   private generation = 0;
   private demoSequence = 0;
+  private notifyFetches = 0;
   private client: ElectrumClient | null = null;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private demoTimer: ReturnType<typeof setTimeout> | null = null;
@@ -102,10 +104,12 @@ export class ChatApp {
 
   async start(): Promise<void> {
     this.messages = await this.store.getAll();
+    this.enforceCap();
     this.settings = loadSettings();
     this.applyForm();
-    if (this.settings.active === "server" && this.settings.autoConnect && this.settings.serverUrl) {
-      await this.connect(this.settings.serverUrl);
+    const saved = normalizeServerUrl(this.settings.serverUrl);
+    if (this.settings.active === "server" && this.settings.autoConnect && saved) {
+      await this.connect(saved);
       return;
     }
     if (this.settings.active === "server" && this.settings.serverUrl) {
@@ -304,6 +308,7 @@ export class ChatApp {
       const message = nextDemoMessage(this.demoSequence, Date.now());
       this.demoSequence += 1;
       this.messages = this.messages.concat(message);
+      this.enforceCap();
       this.info = demoInfo(this.messages);
       void this.store.putMany([message]);
       this.renderFeed();
@@ -393,8 +398,9 @@ export class ChatApp {
       client.onNotification((method, params) => {
         if (!method.toLowerCase().includes("capd")) return;
         const hashes = hashesFromNotification(params);
-        if (hashes.length === 0) return;
-        void this.fetchHashes(client, hashes);
+        if (hashes.length === 0 || this.notifyFetches >= MAX_NOTIFY_FETCHES) return;
+        this.notifyFetches += 1;
+        void this.fetchHashes(client, hashes).finally(() => (this.notifyFetches -= 1));
       });
       return true;
     } catch (error) {
@@ -463,7 +469,8 @@ export class ChatApp {
       if (generation !== this.generation) return;
       this.info = pulled.info;
       this.remaining = pulled.remaining;
-      this.messages = mergePulled(this.messages, pulled.messages, pulled.departed, Date.now());
+      this.messages = mergePulled(this.messages, pulled.messages, pulled.departed, Date.now(), url);
+      this.enforceCap();
       const departed = new Set(pulled.departed ?? []);
       const fetched = new Set(pulled.messages.map((message) => message.hash));
       await this.store.putMany(
@@ -476,6 +483,13 @@ export class ChatApp {
       this.syncing = false;
       if (generation === this.generation) this.renderChrome();
     }
+  }
+
+  private enforceCap(): void {
+    const { kept, dropped } = capStored(this.messages);
+    if (dropped.length === 0) return;
+    this.messages = kept;
+    void this.store.deleteMany(dropped).catch(() => undefined);
   }
 
   private async fetchHashes(client: ElectrumClient, hashes: string[]): Promise<void> {
@@ -495,6 +509,7 @@ export class ChatApp {
     }
     if (fresh.length === 0 || generation !== this.generation) return;
     this.messages = mergePulled(this.messages, fresh, null, Date.now());
+    this.enforceCap();
     await this.store.putMany(fresh);
     this.render();
   }

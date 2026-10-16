@@ -19,21 +19,28 @@ class CapdPeer(
     private val magic = magicFor(network)
     private val parser = FrameParser(magic)
     private val random = SplitMix(seed.toLong() and 0xffffffffL)
-    private val nonce = random.next()
+    private val nonce = kotlin.random.Random.nextLong()
     private var headerCookie = 1L
     private var prefix: ByteArray = prefixBytes(prefixHex) ?: ByteArray(0)
     private var phaseName = "idle"
     private var noteText = ""
     private var capd = -1
     private var pool = ""
+    private var gotVersion = false
     private var sentVerack = false
     private var gotVerack = false
     private var subscribed = false
     private val seen = HashSet<String>()
     private val queryCookie = 1L
+    private var startedAt = 0L
+    private var lastHeard = 0L
+    private var pinged = false
+    private var parseFailures = 0
 
     fun start(nowSeconds: Long): List<ByteArray> {
         phaseName = "handshake"
+        startedAt = nowSeconds
+        lastHeard = nowSeconds
         noteText = "Sending version to $serverId."
         val payload = encodeVersion(
             services = Net.NODE_EXTVERSION,
@@ -50,28 +57,66 @@ class CapdPeer(
     fun receive(bytes: ByteArray, nowSeconds: Long): PeerStep {
         val outgoing = ArrayList<ByteArray>()
         val found = ArrayList<DecodedCapd>()
+        if (phaseName == "failed") return step(outgoing, found)
+        lastHeard = nowSeconds
+        pinged = false
         try {
             for (frame in parser.push(bytes)) {
-                when (frame.command) {
-                    Net.VERSION -> onVersion(frame.payload, outgoing)
-                    Net.EXTVERSION -> onExtversion(frame.payload, outgoing)
-                    Net.VERACK -> onVerack(outgoing)
-                    Net.PING -> outgoing.add(send(Net.PONG, frame.payload, frame.cookie))
-                    Net.CAPDINFO -> onInfo(frame.payload)
-                    Net.CAPDINV -> onInv(frame.payload, outgoing)
-                    Net.CAPDMSG -> found.addAll(takeNew(decodeCapdVector(frame.payload, nowSeconds)))
-                    Net.CAPDQREPLY -> onReply(frame.payload, nowSeconds, outgoing, found)
-                    Net.REJECT -> {
-                        noteText = rejectReason(frame.payload)
-                        phaseName = "failed"
+                if (!subscribed && frame.command != Net.VERSION && frame.command != Net.EXTVERSION &&
+                    frame.command != Net.VERACK && frame.command != Net.PING && frame.command != Net.REJECT
+                ) continue
+                try {
+                    when (frame.command) {
+                        Net.VERSION -> onVersion(frame.payload, outgoing)
+                        Net.EXTVERSION -> onExtversion(frame.payload, outgoing)
+                        Net.VERACK -> onVerack(outgoing)
+                        Net.PING -> if (frame.payload.size <= Net.MAX_PING) {
+                            outgoing.add(send(Net.PONG, frame.payload, frame.cookie))
+                        }
+                        Net.CAPDINFO -> onInfo(frame.payload)
+                        Net.CAPDINV -> onInv(frame.payload, outgoing)
+                        Net.CAPDMSG -> found.addAll(takeNew(decodeCapdVector(frame.payload, nowSeconds), nowSeconds))
+                        Net.CAPDQREPLY -> onReply(frame.payload, nowSeconds, outgoing, found)
+                        Net.REJECT -> noteText = rejectReason(frame.payload)
                     }
+                } catch (error: WireException) {
+                    strike(error.message ?: "Could not read ${frame.command}.")
                 }
+                if (phaseName == "failed") break
             }
         } catch (error: WireException) {
             phaseName = "failed"
             noteText = error.message ?: "Could not read a P2P message."
         }
         return step(outgoing, found)
+    }
+
+    /** Call periodically. Fails a stalled handshake or a silent peer, and pings when idle. */
+    fun tick(nowSeconds: Long): PeerStep {
+        val outgoing = ArrayList<ByteArray>()
+        if (phaseName == "handshake" && nowSeconds - startedAt > Net.HANDSHAKE_TIMEOUT_SEC) {
+            phaseName = "failed"
+            noteText = "The peer did not finish the handshake in time."
+        } else if (phaseName == "listening") {
+            val idle = nowSeconds - lastHeard
+            if (idle > Net.IDLE_TIMEOUT_SEC) {
+                phaseName = "failed"
+                noteText = "The peer went quiet."
+            } else if (idle > Net.IDLE_PING_SEC && !pinged) {
+                pinged = true
+                outgoing.add(send(Net.PING, Buf().apply { u64(random.next()) }.toByteArray()))
+            }
+        }
+        return step(outgoing, emptyList())
+    }
+
+    private fun strike(message: String) {
+        parseFailures++
+        noteText = message
+        if (parseFailures >= Net.MAX_PARSE_FAILURES) {
+            phaseName = "failed"
+            noteText = "Dropped the peer after repeated malformed messages."
+        }
     }
 
     fun updatePrefix(prefixHex: String, nowSeconds: Long): PeerStep {
@@ -95,6 +140,7 @@ class CapdPeer(
     val note: String get() = noteText
 
     private fun onVersion(payload: ByteArray, outgoing: MutableList<ByteArray>) {
+        if (gotVersion) return
         val services = try {
             versionServices(payload)
         } catch (_: WireException) {
@@ -102,6 +148,7 @@ class CapdPeer(
             noteText = "The version message was truncated."
             return
         }
+        gotVersion = true
         if (services and Net.NODE_EXTVERSION != 0L) {
             outgoing.add(
                 send(
@@ -124,6 +171,7 @@ class CapdPeer(
     }
 
     private fun onExtversion(payload: ByteArray, outgoing: MutableList<ByteArray>) {
+        if (!gotVersion || sentVerack) return
         val advertised = try {
             extversionValue(payload, Net.BU_CAPD_VERSION)?.toInt() ?: 0
         } catch (_: WireException) {
@@ -139,9 +187,9 @@ class CapdPeer(
     }
 
     private fun onVerack(outgoing: MutableList<ByteArray>) {
+        if (!gotVersion) return
         gotVerack = true
-        if (!sentVerack) sendVerack(outgoing)
-        if (sentVerack && !subscribed) subscribe(outgoing)
+        if (sentVerack) subscribe(outgoing)
     }
 
     private fun sendVerack(outgoing: MutableList<ByteArray>) {
@@ -181,12 +229,8 @@ class CapdPeer(
     }
 
     private fun onInv(payload: ByteArray, outgoing: MutableList<ByteArray>) {
-        val hashes = try {
-            decodeInv(payload)
-        } catch (error: WireException) {
-            noteText = error.message ?: "Could not read capdinv."
-            return
-        }
+        val hashes = decodeInv(payload)
+        if (seen.size > MAX_SEEN) seen.clear()
         val fresh = hashes.filter { seen.add(hexEncode(it)) }
         if (fresh.isNotEmpty()) outgoing.add(send(Net.CAPDGETMSG, encodeGetMsg(0.0, fresh)))
     }
@@ -197,24 +241,19 @@ class CapdPeer(
         outgoing: MutableList<ByteArray>,
         found: MutableList<DecodedCapd>,
     ) {
-        val reply = try {
-            decodeQueryReply(payload, nowSeconds)
-        } catch (error: WireException) {
-            noteText = error.message ?: "Could not read a CAPD reply."
-            return
-        }
+        val reply = decodeQueryReply(payload, nowSeconds)
         if (reply.error != null) {
             noteText = "The peer rejected the CAPD query (${reply.error})."
             return
         }
-        found.addAll(takeNew(reply.messages))
+        found.addAll(takeNew(reply.messages, nowSeconds))
         val fresh = reply.hashes.filter { seen.add(hexEncode(it)) }
         if (fresh.isNotEmpty()) outgoing.add(send(Net.CAPDGETMSG, encodeGetMsg(0.0, fresh)))
     }
 
-    private fun takeNew(messages: List<DecodedCapd>): List<DecodedCapd> {
+    private fun takeNew(messages: List<DecodedCapd>, nowSeconds: Long): List<DecodedCapd> {
         messages.forEach { seen.add(hexEncode(hexDecode(it.hash)!!.reversedArray())) }
-        return messages
+        return messages.filter { it.acceptable(nowSeconds) }
     }
 
     private fun send(command: String, payload: ByteArray, cookie: Long = nextCookie()): ByteArray {
@@ -247,6 +286,7 @@ class CapdPeer(
 
     companion object {
         const val USER_AGENT = "/capd-chat:1.0/"
+        private const val MAX_SEEN = 20_000
     }
 }
 

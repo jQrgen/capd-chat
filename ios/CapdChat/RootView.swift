@@ -80,6 +80,11 @@ struct RootView: View {
             }
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(Palette.copper)
+            if !model.peers.isEmpty {
+                Text(model.peers)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(Palette.muted)
+            }
             if !model.pool.isEmpty {
                 Text(model.pool)
                     .font(.caption.monospaced())

@@ -35,12 +35,14 @@ final class SessionModel: ObservableObject {
     @Published var prefix = ""
     @Published var listening = false
     @Published var pool = ""
+    @Published var peers = ""
     @Published var server = "demo"
     @Published var selected: FeedItem?
     @Published var jump = 0
 
     private let app = CapdApp()
-    private var connection: NWConnection?
+    private var links: [String: Link] = [:]
+    private var ticker: Task<Void, Never>?
     private var wantListen = false
     private var generation = 0
     private let fileURL: URL
@@ -51,7 +53,7 @@ final class SessionModel: ObservableObject {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         fileURL = directory.appendingPathComponent("messages.json")
         if let text = try? String(contentsOf: fileURL, encoding: .utf8) {
-            _ = app.loadArchive(json: text)
+            _ = app.loadArchive(json: text, nowMs: nowMs())
         }
         server = app.latestServer()
         refresh()
@@ -73,7 +75,7 @@ final class SessionModel: ObservableObject {
     }
 
     func pauseForBackground() {
-        guard wantListen || connection != nil else { return }
+        guard wantListen || !links.isEmpty else { return }
         closeSocket(markOffline: true)
         status = "Paused"
         tone = "disconnected"
@@ -109,9 +111,11 @@ final class SessionModel: ObservableObject {
 
     func applyPrefix() {
         guard listening else { return }
-        let result = app.setPrefix(prefixHex: prefix, nowSeconds: nowSeconds())
-        write(result.sendHex)
-        note(from: result)
+        for id in links.keys {
+            let result = app.setPrefix(peerId: id, prefixHex: prefix, nowSeconds: nowSeconds())
+            write(result.sendHex, to: id)
+            note(from: result)
+        }
     }
 
     func refresh() {
@@ -129,58 +133,77 @@ final class SessionModel: ObservableObject {
         closeSocket(markOffline: false)
         generation += 1
         let token = generation
-        server = "\(network)/\(endpoint.host):\(endpoint.port)"
+        let seeds = Self.seeds[network] ?? []
+        let seeded = seeds.contains(endpoint.host)
+        server = seeded ? "\(network)/seeds" : "\(network)/\(endpoint.host):\(endpoint.port)"
         status = "Connecting"
         tone = "connecting"
-        detail = "Opening a TCP peer to \(endpoint.host):\(endpoint.port)."
+        detail = seeded ? "Looking up peers from \(seeds.count) seeds." : "Opening a TCP peer to \(endpoint.host):\(endpoint.port)."
         pool = ""
+        peers = ""
         listening = true
         refresh()
 
+        let hosts = seeded ? seeds : [endpoint.host]
+        let port = endpoint.port
+        Task.detached {
+            let targets = seeded ? pickPeers(hosts: hosts, port: port) : [endpoint.host]
+            await MainActor.run {
+                guard token == self.generation else { return }
+                if targets.isEmpty {
+                    self.fail("No peers found from the seeds.")
+                    return
+                }
+                for target in targets { self.openPeer(host: target, port: port, token: token) }
+                self.startTicker(token)
+            }
+        }
+    }
+
+    private func openPeer(host: String, port: UInt16, token: Int) {
+        let id = "\(host):\(port)"
         let opened = app.open(
             network: network,
-            serverId: server,
-            peerPort: Int32(endpoint.port),
+            server: server,
+            peerId: id,
+            peerPort: Int32(port),
             prefixHex: prefix,
             seed: Int32.random(in: 1...Int32.max),
             nowSeconds: nowSeconds()
         )
         if opened.phase == "failed" {
-            status = "Could not start"
-            tone = "error"
-            detail = opened.note
-            listening = false
+            dropPeer(id, reason: opened.note)
             return
         }
-
-        let port = NWEndpoint.Port(rawValue: endpoint.port) ?? .any
-        let connection = NWConnection(host: NWEndpoint.Host(endpoint.host), port: port, using: .tcp)
-        self.connection = connection
+        let connection = NWConnection(
+            host: NWEndpoint.Host(host),
+            port: NWEndpoint.Port(rawValue: port) ?? .any,
+            using: .tcp
+        )
+        links[id] = Link(connection: connection, pending: opened.sendHex)
         connection.stateUpdateHandler = { [weak self] state in
             Task { @MainActor in
                 guard let self, token == self.generation else { return }
-                self.onState(state, token: token)
+                self.onState(state, id: id, token: token)
             }
         }
         connection.start(queue: .global(qos: .userInitiated))
-        pending = opened.sendHex
     }
 
-    private var pending = ""
-
-    private func onState(_ state: NWConnection.State, token: Int) {
+    private func onState(_ state: NWConnection.State, id: String, token: Int) {
         switch state {
         case .ready:
-            status = "Handshake"
-            tone = "connecting"
-            detail = "TCP is up. Sending version."
-            write(pending)
-            pending = ""
-            readLoop(token)
+            guard var link = links[id] else { return }
+            if case .hostPort(let host, _) = link.connection.currentPath?.remoteEndpoint {
+                link.address = "\(host)"
+            }
+            write(link.pending, to: id)
+            link.pending = ""
+            links[id] = link
+            updatePeers()
+            readLoop(id, token)
         case .failed(let error):
-            fail("The connection failed. \(error.localizedDescription)")
-        case .cancelled:
-            break
+            dropPeer(id, reason: "The connection failed. \(error.localizedDescription)")
         case .waiting(let error):
             detail = error.localizedDescription
         default:
@@ -188,21 +211,13 @@ final class SessionModel: ObservableObject {
         }
     }
 
-    private func readLoop(_ token: Int) {
-        connection?.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
+    private func readLoop(_ id: String, _ token: Int) {
+        links[id]?.connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
             Task { @MainActor in
-                guard let self, token == self.generation else { return }
+                guard let self, token == self.generation, self.links[id] != nil else { return }
                 if let data, !data.isEmpty {
-                    let result = self.app.ingest(hexChunk: data.hexEncoded(), nowSeconds: nowSeconds(), nowMs: nowMs())
-                    self.write(result.sendHex)
-                    self.note(from: result)
-                    if result.phase == "listening" {
-                        self.listening = true
-                    }
-                    if result.phase == "failed" {
-                        self.fail(result.note)
-                        return
-                    }
+                    let result = self.app.ingest(peerId: id, hexChunk: data.hexEncoded(), nowSeconds: nowSeconds(), nowMs: nowMs())
+                    if !self.handle(result, id: id) { return }
                     if result.messageCount > 0 {
                         self.persist()
                         self.jump += 1
@@ -210,14 +225,56 @@ final class SessionModel: ObservableObject {
                     self.refresh()
                 }
                 if isComplete || error != nil {
-                    if self.wantListen && token == self.generation {
-                        self.fail(error?.localizedDescription ?? "The peer closed the connection.")
-                    }
+                    self.dropPeer(id, reason: error?.localizedDescription ?? "The peer closed the connection.")
                     return
                 }
-                self.readLoop(token)
+                self.readLoop(id, token)
             }
         }
+    }
+
+    /// Returns false when the peer was dropped.
+    private func handle(_ result: Ingest, id: String) -> Bool {
+        write(result.sendHex, to: id)
+        if result.phase == "failed" {
+            dropPeer(id, reason: result.note)
+            return false
+        }
+        if result.phase == "listening" {
+            links[id]?.listening = true
+            listening = true
+            updatePeers()
+        }
+        note(from: result)
+        return true
+    }
+
+    private func startTicker(_ token: Int) {
+        ticker?.cancel()
+        ticker = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self, token == self.generation else { return }
+                for id in self.links.keys {
+                    _ = self.handle(self.app.tick(peerId: id, nowSeconds: nowSeconds()), id: id)
+                }
+            }
+        }
+    }
+
+    private func dropPeer(_ id: String, reason: String) {
+        links[id]?.connection.cancel()
+        links[id] = nil
+        app.close(peerId: id)
+        updatePeers()
+        if links.isEmpty && wantListen {
+            fail(reason)
+        }
+    }
+
+    private func updatePeers() {
+        let up = links.values.filter { $0.listening }.map { $0.address ?? "?" }.sorted()
+        peers = up.isEmpty ? "" : "Connected to \(up.count) peer\(up.count == 1 ? "" : "s"): \(up.joined(separator: ", "))"
     }
 
     private func note(from result: Ingest) {
@@ -235,10 +292,11 @@ final class SessionModel: ObservableObject {
         if !result.poolSummary.isEmpty { pool = result.poolSummary }
     }
 
-    private func write(_ hexFrames: String) {
+    private func write(_ hexFrames: String, to id: String) {
+        guard let connection = links[id]?.connection else { return }
         let chunks = hexFrames.split(separator: "\n").map { Data(hex: String($0)) }
         for chunk in chunks where !chunk.isEmpty {
-            connection?.send(content: chunk, completion: .contentProcessed { _ in })
+            connection.send(content: chunk, completion: .contentProcessed { _ in })
         }
     }
 
@@ -254,9 +312,14 @@ final class SessionModel: ObservableObject {
 
     private func closeSocket(markOffline: Bool) {
         generation += 1
-        connection?.cancel()
-        connection = nil
-        pending = ""
+        ticker?.cancel()
+        ticker = nil
+        for (id, link) in links {
+            link.connection.cancel()
+            app.close(peerId: id)
+        }
+        links = [:]
+        peers = ""
         if markOffline {
             app.markOffline(server: server)
             persist()
@@ -276,7 +339,18 @@ final class SessionModel: ObservableObject {
         text = text.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         var port: UInt16 = network == "testnet" ? 7230 : 7228
         var name = text
-        if let colon = text.lastIndex(of: ":"), text.index(after: colon) < text.endIndex {
+        if text.hasPrefix("["), let close = text.firstIndex(of: "]") {
+            name = String(text[text.index(after: text.startIndex)..<close])
+            let rest = text[text.index(after: close)...]
+            if rest.hasPrefix(":") {
+                guard let parsed = UInt16(rest.dropFirst()) else { return nil }
+                port = parsed
+            } else if !rest.isEmpty {
+                return nil
+            }
+        } else if text.filter({ $0 == ":" }).count > 1 {
+            name = text
+        } else if let colon = text.lastIndex(of: ":"), text.index(after: colon) < text.endIndex {
             let suffix = text[text.index(after: colon)...]
             if let parsed = UInt16(suffix) {
                 name = String(text[..<colon])
@@ -286,6 +360,45 @@ final class SessionModel: ObservableObject {
         if name.isEmpty { return nil }
         return (name, port)
     }
+
+    private struct Link {
+        var connection: NWConnection
+        var pending: String
+        var address: String?
+        var listening = false
+    }
+
+    static let seeds: [String: [String]] = [
+        "mainnet": ["seed.nextchain.cash", "seeder.nexa.org", "nexa-seeder.bitcoinunlimited.info"],
+        "testnet": ["nexa-testnet-seeder.bitcoinunlimited.info", "testnetseeder.nexa.org"],
+    ]
+}
+
+/// Up to two addresses from each seed, at most four peers in all.
+private func pickPeers(hosts: [String], port: UInt16) -> [String] {
+    var picked: [String] = []
+    for host in hosts {
+        var hints = addrinfo()
+        hints.ai_socktype = SOCK_STREAM
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, String(port), &hints, &result) == 0 else { continue }
+        defer { freeaddrinfo(result) }
+        var fromSeed = 0
+        var node = result
+        while let info = node, fromSeed < 2 {
+            var name = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(info.pointee.ai_addr, info.pointee.ai_addrlen, &name, socklen_t(name.count),
+                           nil, 0, NI_NUMERICHOST) == 0 {
+                let address = String(cString: name)
+                if !picked.contains(address) {
+                    picked.append(address)
+                    fromSeed += 1
+                }
+            }
+            node = info.pointee.ai_next
+        }
+    }
+    return Array(picked.prefix(4))
 }
 
 private func nowSeconds() -> Int64 { Int64(Date().timeIntervalSince1970) }

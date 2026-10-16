@@ -108,6 +108,17 @@ internal class Reader(private val data: ByteArray) {
         return slice
     }
 
+    fun skip(count: Int) {
+        need(count)
+        pos += count
+    }
+
+    fun skipVector(max: Int) {
+        val size = compact()
+        if (size > max.toULong()) throw WireException("vector of $size exceeds $max")
+        skip(size.toInt())
+    }
+
     fun compact(): ULong {
         val first = u8()
         return when {

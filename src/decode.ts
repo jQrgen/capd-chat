@@ -39,6 +39,8 @@ export function isReadableText(text: string): boolean {
   return true;
 }
 
+const BIDI_CONTROLS = /[\u061c\u200e\u200f\u202a-\u202e\u2028\u2029\u2066-\u206f]/g;
+
 export function decodePayload(hex: string): { text: string | null; byteLength: number } | null {
   const bytes = hexToBytes(hex);
   if (!bytes) return null;
@@ -46,7 +48,7 @@ export function decodePayload(hex: string): { text: string | null; byteLength: n
   try {
     const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     if (!isReadableText(text)) return { text: null, byteLength: bytes.length };
-    return { text, byteLength: bytes.length };
+    return { text: text.replace(BIDI_CONTROLS, ""), byteLength: bytes.length };
   } catch {
     return { text: null, byteLength: bytes.length };
   }
