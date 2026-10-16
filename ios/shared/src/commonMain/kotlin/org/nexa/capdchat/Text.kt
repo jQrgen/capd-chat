@@ -10,7 +10,7 @@ fun decodePayload(bytes: ByteArray): String? {
     return text.replace(BIDI_CONTROLS, "")
 }
 
-private val BIDI_CONTROLS = Regex("[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+private val BIDI_CONTROLS = Regex("[\u061c\u200e\u200f\u202a-\u202e\u2028\u2029\u2066-\u206f]")
 
 internal fun isReadable(text: String): Boolean {
     var i = 0

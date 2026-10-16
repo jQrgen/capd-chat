@@ -107,8 +107,9 @@ export class ChatApp {
     this.enforceCap();
     this.settings = loadSettings();
     this.applyForm();
-    if (this.settings.active === "server" && this.settings.autoConnect && this.settings.serverUrl) {
-      await this.connect(this.settings.serverUrl);
+    const saved = normalizeServerUrl(this.settings.serverUrl);
+    if (this.settings.active === "server" && this.settings.autoConnect && saved) {
+      await this.connect(saved);
       return;
     }
     if (this.settings.active === "server" && this.settings.serverUrl) {

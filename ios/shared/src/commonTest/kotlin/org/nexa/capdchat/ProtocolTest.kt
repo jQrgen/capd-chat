@@ -56,6 +56,8 @@ class ProtocolTest {
         assertTrue(fresh > 4096.0 && fresh < 4096.01)
         val aged = capdPriority(0x1e0fffff, 4, 600)
         assertTrue(kotlin.math.abs(aged) < 0.001)
+        assertTrue(capdPriority(0x1e0fffff, 4, -1) < -1e15)
+        assertEquals(compactTargetHex(0x1e0fffff), compactTargetHex(0x1e8fffff))
     }
 
     @Test
@@ -266,9 +268,24 @@ class ProtocolTest {
         val decoded = decodeCapd(Reader(encodeCapd(good)), 1_700_000_010)
         assertTrue(decoded.acceptable(1_700_000_010))
         assertFalse(decoded.acceptable(1_700_000_061))
-        assertFalse(decoded.acceptable(1_700_000_000 - Net.MAX_FUTURE_SEC - 1))
+        assertFalse(decoded.acceptable(1_700_000_000 - ClientLimits.MAX_FUTURE_SEC - 1))
         assertFalse(decoded.copy(hash = "f".repeat(64)).acceptable(1_700_000_010))
         assertFalse(decoded.copy(size = 2).acceptable(1_700_000_010))
+        assertFalse(decoded.copy(data = "79").acceptable(1_700_000_010))
+    }
+
+    @Test
+    fun tightLimits() {
+        val easy = CapdBody(1_700_000_000, 60, null, "x".encodeToByteArray(), 0x207fffff, byteArrayOf(0)).mined()
+        assertFalse(decodeCapd(Reader(encodeCapd(easy)), 1_700_000_010).acceptable(1_700_000_010))
+        val wire = encodeCapd(easy).also { it[0] = 4 }
+        assertFailsWith<WireException> { decodeCapd(Reader(wire), 1_700_000_010) }
+        val header = frame(Net.MAINNET_MAGIC, Net.PING, 1, ByteArray(0)).copyOf(Net.HEADER_SIZE)
+        Buf().apply { u32(Net.MAX_PAYLOAD + 1L) }.toByteArray().copyInto(header, 16)
+        assertFailsWith<WireException> { FrameParser(Net.MAINNET_MAGIC).push(header) }
+        val peer = CapdPeer("mainnet", "seed:7228", 7228, seed = 8)
+        finish(peer)
+        assertTrue(peer.receive(frame(Net.MAINNET_MAGIC, Net.PING, 2, ByteArray(9)), 10).send.isEmpty())
     }
 
     private fun CapdBody.mined(): CapdBody {

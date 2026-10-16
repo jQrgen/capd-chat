@@ -1,10 +1,12 @@
 import { mapLimit } from "./async";
+import { verifyWork } from "./capd";
 import { decodePayload, isEvenHex, isMessageHash } from "./decode";
 import type { CapdInfo, StoredMessage } from "./types";
 
 export const FETCH_CAP = 200;
 export const FETCH_CONCURRENCY = 6;
 const NEVER_EXPIRES = 65535;
+// Client-side safety limits and local policy, not protocol rules.
 export const MAX_LIST = 10_000;
 export const MAX_STORED = 5_000;
 export const MAX_DATA_BYTES = 64 * 1024;
@@ -121,11 +123,15 @@ export function parseCapdMessage(value: unknown, nowSec = Date.now() / 1000): Pa
 
   const decoded = decodePayload(data);
   if (!decoded) return { ok: false, reason: "data is not hex" };
+  const hash = record.hash.toLowerCase();
+  if (!verifyWork(hash, data, created, expiration ?? NEVER_EXPIRES, difficultyBits, nonce)) {
+    return { ok: false, reason: "proof of work does not match" };
+  }
 
   return {
     ok: true,
     message: {
-      hash: record.hash.toLowerCase(),
+      hash,
       created,
       ...(expiration !== undefined ? { expiration } : {}),
       difficultyBits,

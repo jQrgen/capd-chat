@@ -19,7 +19,7 @@ class CapdPeer(
     private val magic = magicFor(network)
     private val parser = FrameParser(magic)
     private val random = SplitMix(seed.toLong() and 0xffffffffL)
-    private val nonce = random.next()
+    private val nonce = kotlin.random.Random.nextLong()
     private var headerCookie = 1L
     private var prefix: ByteArray = prefixBytes(prefixHex) ?: ByteArray(0)
     private var phaseName = "idle"
@@ -70,7 +70,9 @@ class CapdPeer(
                         Net.VERSION -> onVersion(frame.payload, outgoing)
                         Net.EXTVERSION -> onExtversion(frame.payload, outgoing)
                         Net.VERACK -> onVerack(outgoing)
-                        Net.PING -> outgoing.add(send(Net.PONG, frame.payload, frame.cookie))
+                        Net.PING -> if (frame.payload.size <= Net.MAX_PING) {
+                            outgoing.add(send(Net.PONG, frame.payload, frame.cookie))
+                        }
                         Net.CAPDINFO -> onInfo(frame.payload)
                         Net.CAPDINV -> onInv(frame.payload, outgoing)
                         Net.CAPDMSG -> found.addAll(takeNew(decodeCapdVector(frame.payload, nowSeconds), nowSeconds))

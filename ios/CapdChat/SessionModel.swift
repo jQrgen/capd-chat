@@ -339,7 +339,18 @@ final class SessionModel: ObservableObject {
         text = text.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         var port: UInt16 = network == "testnet" ? 7230 : 7228
         var name = text
-        if let colon = text.lastIndex(of: ":"), text.index(after: colon) < text.endIndex {
+        if text.hasPrefix("["), let close = text.firstIndex(of: "]") {
+            name = String(text[text.index(after: text.startIndex)..<close])
+            let rest = text[text.index(after: close)...]
+            if rest.hasPrefix(":") {
+                guard let parsed = UInt16(rest.dropFirst()) else { return nil }
+                port = parsed
+            } else if !rest.isEmpty {
+                return nil
+            }
+        } else if text.filter({ $0 == ":" }).count > 1 {
+            name = text
+        } else if let colon = text.lastIndex(of: ":"), text.index(after: colon) < text.endIndex {
             let suffix = text[text.index(after: colon)...]
             if let parsed = UInt16(suffix) {
                 name = String(text[..<colon])

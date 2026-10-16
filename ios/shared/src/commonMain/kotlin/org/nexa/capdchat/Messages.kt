@@ -26,6 +26,7 @@ data class DecodedCapd(
     val size: Int,
     val data: String,
     val text: String?,
+    val rescind: String? = null,
 )
 
 internal object Net {
@@ -33,6 +34,7 @@ internal object Net {
     const val NODE_EXTVERSION = 1L shl 11
     const val HEADER_SIZE = 24
     const val MAX_PAYLOAD = 2 * 1024 * 1024
+    const val MAX_PING = 8
     const val CAPD_MSG_TYPE = 72
     const val QUERY_MSG = 1
     const val QUERY_HASH = 2
@@ -44,9 +46,6 @@ internal object Net {
     const val QUERY_MAX_HASHES = 2000
     /** Smallest CapdMsg on the wire: fields, time, bits, empty nonce, empty data. */
     const val MIN_CAPD_MSG = 15
-    const val MAX_CAPD_DATA = 64 * 1024
-    const val MAX_FUTURE_SEC = 120L
-    const val MAX_MSG_VECTOR = 500
     const val HANDSHAKE_TIMEOUT_SEC = 20L
     const val IDLE_PING_SEC = 120L
     const val IDLE_TIMEOUT_SEC = 300L
@@ -74,6 +73,19 @@ internal object Net {
     const val REJECT = "reject"
 }
 
+/**
+ * Client-side safety limits and local policy. These are tighter than the node
+ * (capdinv 20000, capdmsg 5000, data up to GetMaxAllowedNetMessage) and are not protocol rules.
+ */
+internal object ClientLimits {
+    const val MAX_INV = 2000
+    const val MAX_MSG_VECTOR = 500
+    const val MAX_CAPD_DATA = 64 * 1024
+    const val MAX_FUTURE_SEC = 120L
+    /** The node's `MIN_LOCAL_PRIORITY` with an empty pool. */
+    const val MIN_PRIORITY = 1.0
+}
+
 internal data class Frame(val command: String, val cookie: Long, val payload: ByteArray)
 
 internal fun magicFor(network: String): ByteArray = when (network) {
@@ -98,9 +110,6 @@ internal class FrameParser(private val magic: ByteArray) {
     fun push(chunk: ByteArray): List<Frame> {
         if (chunk.isEmpty()) return emptyList()
         pending = pending + chunk
-        if (pending.size > Net.MAX_PAYLOAD + Net.HEADER_SIZE) {
-            throw WireException("peer sent more than ${Net.MAX_PAYLOAD} bytes without a complete message")
-        }
         val frames = ArrayList<Frame>()
         while (pending.size >= Net.HEADER_SIZE) {
             if (!pending.copyOfRange(0, 4).contentEquals(magic)) {
@@ -204,12 +213,13 @@ internal fun encodeCapd(message: CapdBody): ByteArray = Buf().apply {
 
 internal fun decodeCapd(reader: Reader, nowSeconds: Long): DecodedCapd {
     val fields = reader.u8()
+    if (fields and 3.inv() != 0) throw WireException("unknown CAPD fields $fields")
     val created = reader.u64()
     val bits = reader.u32()
     val nonce = reader.vector(64)
     val expiration = if (fields and 1 != 0) reader.u16() else NEVER_EXPIRE
     val rescind = if (fields and 2 != 0) reader.bytes(20) else null
-    val data = reader.vector(Net.MAX_CAPD_DATA)
+    val data = reader.vector(ClientLimits.MAX_CAPD_DATA)
     val body = CapdBody(
         createTime = created,
         expiration = if (expiration == NEVER_EXPIRE) null else expiration,
@@ -231,12 +241,13 @@ internal fun decodeCapd(reader: Reader, nowSeconds: Long): DecodedCapd {
         size = data.size,
         data = hexEncode(data),
         text = decodePayload(data),
+        rescind = rescind?.let { hexEncode(it) },
     )
 }
 
 internal fun decodeCapdVector(payload: ByteArray, nowSeconds: Long): List<DecodedCapd> {
     val reader = Reader(payload)
-    val count = boundedCount(reader.compact(), Net.MAX_MSG_VECTOR, reader.remaining(), Net.MIN_CAPD_MSG)
+    val count = boundedCount(reader.compact(), ClientLimits.MAX_MSG_VECTOR, reader.remaining(), Net.MIN_CAPD_MSG)
     return List(count) { decodeCapd(reader, nowSeconds) }
 }
 
@@ -311,30 +322,44 @@ internal fun decodeInv(payload: ByteArray): List<ByteArray> {
     val reader = Reader(payload)
     val type = reader.compact()
     if (type != Net.CAPD_MSG_TYPE.toULong()) return emptyList()
-    val count = boundedCount(reader.compact(), Net.QUERY_MAX_HASHES, reader.remaining(), 32)
+    val count = boundedCount(reader.compact(), ClientLimits.MAX_INV, reader.remaining(), 32)
     return List(count) { reader.bytes(32) }
 }
 
-/** Proof of work meets its own target, the payload is within size, and the message is current. */
+/** `CapdMsg::DoesPowMeetTarget`: the hash recomputed from the body is strictly below the target. */
+internal fun powMeetsTarget(body: CapdBody, hash: String): Boolean {
+    val actual = capdHash(body)
+    return actual == hash.lowercase() && actual < compactTargetHex(body.difficultyBits)
+}
+
+/** Local policy: size, minimum priority, not future-dated, not past its expiration. */
+internal fun withinClientLimits(bits: Long, created: Long, expiration: Int?, size: Int, nowSeconds: Long): Boolean {
+    if (size < 0 || size > ClientLimits.MAX_CAPD_DATA) return false
+    if (capdPriority(bits, size, 0) < ClientLimits.MIN_PRIORITY) return false
+    if (created > nowSeconds + ClientLimits.MAX_FUTURE_SEC) return false
+    return expiration == null || created + expiration >= nowSeconds
+}
+
 internal fun capdAcceptable(
     hash: String,
-    difficultyBits: Long,
+    bits: Long,
     created: Long,
     expiration: Int?,
-    size: Int,
+    rescindHex: String?,
     dataHex: String,
+    nonceHex: String,
     nowSeconds: Long,
+    kept: Boolean = false,
 ): Boolean {
-    if (size < 0 || size > Net.MAX_CAPD_DATA || dataHex.length != size * 2) return false
-    if (created > nowSeconds + Net.MAX_FUTURE_SEC) return false
-    if (expiration != null && created + expiration < nowSeconds) return false
-    val target = compactTargetHex(difficultyBits)
-    if (hash.length != 64 || target.all { it == '0' }) return false
-    return hash.lowercase() <= target
+    val data = hexDecode(dataHex) ?: return false
+    val nonce = hexDecode(nonceHex) ?: return false
+    val rescind = rescindHex?.let { hexDecode(it)?.takeIf { r -> r.size == 20 } ?: return false }
+    if (!withinClientLimits(bits, created, if (kept) null else expiration, data.size, nowSeconds)) return false
+    return powMeetsTarget(CapdBody(created, expiration, rescind, data, bits, nonce), hash)
 }
 
 internal fun DecodedCapd.acceptable(nowSeconds: Long) =
-    capdAcceptable(hash, difficultyBits, created, expiration, size, data, nowSeconds)
+    size == data.length / 2 && capdAcceptable(hash, difficultyBits, created, expiration, rescind, data, nonce, nowSeconds)
 
 internal fun decodeInfo(payload: ByteArray): Triple<Double, Double, Double>? {
     if (payload.size < 24) return null

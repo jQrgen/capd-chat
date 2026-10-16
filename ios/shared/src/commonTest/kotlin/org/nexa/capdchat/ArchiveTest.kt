@@ -1,5 +1,7 @@
 package org.nexa.capdchat
 
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -55,27 +57,33 @@ class ArchiveTest {
         val archive = ChatArchive()
         archive.accept(sample("bad").copy(hash = "f".repeat(64)), "peer", 1_000)
         assertTrue(archive.visible("peer", "", "all", "all").isEmpty())
-        archive.accept(sample("short").copy(expiration = 60), "peer", 1_000)
-        archive.accept(sample("keep").copy(expiration = 60), "peer", 1_000)
-        archive.setKept("peer", sample("keep").hash, true)
+        archive.accept(sample("short", 60), "peer", 1_000)
+        archive.accept(sample("keep", 60), "peer", 1_000)
+        archive.setKept("peer", sample("keep", 60).hash, true)
         archive.prune(120_000)
         assertEquals("keep", archive.visible("peer", "", "all", "all").single().text)
     }
 
-    private fun sample(text: String): DecodedCapd {
-        val data = text.encodeToByteArray()
-        return DecodedCapd(
-            hash = "00000000" + hexEncode(Sha256.hash(data)).drop(8),
-            created = 0,
-            expiration = null,
-            difficultyBits = 0x1e0fffff,
-            priority = 8.0,
-            initialPriority = 8.0,
-            powTarget = compactTargetHex(0x1e0fffff),
-            nonce = "01",
-            size = data.size,
-            data = hexEncode(data),
-            text = text,
-        )
+    @Test
+    fun archiveIsCappedByBytes() {
+        val big = "61".repeat(ClientLimits.MAX_CAPD_DATA)
+        val count = (ChatArchive.MAX_STORED_BYTES / ClientLimits.MAX_CAPD_DATA).toInt()
+        val rows = List(count + 3) {
+            StoredCapd(it.toString(), 0, null, 0, 0.0, 0.0, "", "", ClientLimits.MAX_CAPD_DATA, big, null, false,
+                ChatArchive.DEMO_SERVER, "network", it.toLong(), it.toLong())
+        }
+        val archive = ChatArchive()
+        assertTrue(archive.load(Json.encodeToString(ArchiveSnapshot(messages = rows)), 1_000))
+        assertEquals(count, archive.visible(ChatArchive.DEMO_SERVER, "", "all", "all").size)
+    }
+
+    private fun sample(text: String, expiration: Int? = null): DecodedCapd {
+        val target = compactTargetHex(0x2000ffff)
+        var n = 0
+        while (true) {
+            val body = CapdBody(0, expiration, null, text.encodeToByteArray(), 0x2000ffff, byteArrayOf(n.toByte(), (n shr 8).toByte()))
+            if (capdHash(body) < target) return decodeCapd(Reader(encodeCapd(body)), 0)
+            n++
+        }
     }
 }

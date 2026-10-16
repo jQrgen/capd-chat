@@ -140,6 +140,7 @@ export class ElectrumClient {
   }
 
   private onMessage(raw: string): void {
+    if (raw.length > MAX_RESPONSE_CHARS) return;
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -223,6 +224,7 @@ export async function negotiateVersion(client: ElectrumClient): Promise<string> 
  * Accept a hash, a list of hashes, or a `capd.get` object wherever they appear.
  */
 export const MAX_NOTIFY_HASHES = 50;
+export const MAX_RESPONSE_CHARS = 2 * 1024 * 1024;
 
 export function hashesFromNotification(params: unknown[]): string[] {
   const hashes: string[] = [];

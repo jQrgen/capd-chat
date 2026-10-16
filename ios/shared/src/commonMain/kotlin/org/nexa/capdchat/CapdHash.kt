@@ -27,15 +27,14 @@ internal fun hashPreimage(message: CapdBody): ByteArray = Buf().apply {
 
 /**
  * Bitcoin compact target, expanded to the 32-byte form `uint256::GetHex` prints.
- * The sign bit is treated as an empty target.
+ * Like `arith_uint256::SetCompact`, the sign bit is ignored and overflowing bytes are dropped.
  */
 fun compactTargetHex(bits: Long): String {
     val compact = bits.toInt()
-    if (compact and 0x00800000 != 0) return "00".repeat(32)
     val size = compact ushr 24
     val word = compact and 0x007fffff
     val raw = ByteArray(32)
-    if (word != 0 && size in 1..32) {
+    if (word != 0) {
         val shifted = if (size <= 3) word ushr (8 * (3 - size)) else word
         val start = if (size <= 3) 0 else size - 3
         var value = shifted
@@ -50,8 +49,8 @@ fun compactTargetHex(bits: Long): String {
 }
 
 /**
- * Node priority from `Priority()` in capdmsg.cpp. Age is clamped at zero when
- * the message is dated in the future. The minimum difficulty is 2^248, which
+ * Node priority from `Priority()` in capdmsg.cpp. The node passes age as uint64_t,
+ * so a future-dated message wraps to a huge age and a very negative priority. The minimum difficulty is 2^248, which
  * is the double the node gets from the 248-bit minimum target.
  */
 fun capdPriority(bits: Long, contentLength: Int, ageSeconds: Long): Double {
@@ -61,14 +60,13 @@ fun capdPriority(bits: Long, contentLength: Int, ageSeconds: Long): Double {
     if (contentLength > NOMINAL_MSG_SIZE) {
         value = (value / contentLength) * NOMINAL_MSG_SIZE
     }
-    val age = if (ageSeconds < 0) 0 else ageSeconds
+    val age = if (ageSeconds < 0) ageSeconds.toDouble() + 18446744073709551616.0 else ageSeconds.toDouble()
     value -= (value / MSG_LIFETIME_SEC) * age
     return value
 }
 
 private fun compactTargetDouble(bits: Long): Double {
     val compact = bits.toInt()
-    if (compact and 0x00800000 != 0) return 0.0
     val size = compact ushr 24
     val word = (compact and 0x007fffff).toDouble()
     if (word == 0.0) return 0.0

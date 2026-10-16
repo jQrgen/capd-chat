@@ -1,17 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { capStored, MAX_LIST, departedHashes, mergePulled, parseCapdInfo, parseCapdList, parseCapdMessage, planFetch, pullPool, snapshotIsComplete, stampMessage } from "../src/pool";
 import type { StoredMessage } from "../src/types";
+import { capdHash, compactTargetHex } from "../src/capd";
+import { hexToBytes } from "../src/decode";
 
 const HASH_A = "aa".repeat(32);
 const HASH_B = "bb".repeat(32);
 const HASH_C = "cc".repeat(32);
 const HASH_D = "dd".repeat(32);
 
-const sample = {
-  hash: "aa".repeat(32),
+const base = {
   created: 1_700_000_000,
   expiration: 600,
-  difficultyBits: 486604799,
+  difficultyBits: 0x1f00ffff,
   priority: 1.5,
   initialPriority: 2.5,
   powTarget: "00000000000000000000000000000000000000000000000000000000000000ff",
@@ -19,6 +20,18 @@ const sample = {
   size: 40,
   data: "6869",
 };
+
+function mined(fields: typeof base) {
+  const target = compactTargetHex(fields.difficultyBits);
+  for (let n = 0; ; n++) {
+    const nonce = n.toString(16).padStart(8, "0");
+    const hash = capdHash(hexToBytes(fields.data)!, fields.created, fields.expiration, fields.difficultyBits, hexToBytes(nonce)!);
+    if (hash < target) return { ...fields, nonce, hash };
+  }
+}
+
+const sample = mined(base);
+const binary = mined({ ...base, data: "00ff" });
 
 describe("CAPD response parsing", () => {
   it("keeps the Rostrum capd.get shape and treats 65535 as no expiration", () => {
@@ -29,10 +42,17 @@ describe("CAPD response parsing", () => {
     expect(parsed.message.expiration).toBe(600);
     expect(parsed.message.powTarget.endsWith("ff")).toBe(true);
 
-    const forever = parseCapdMessage({ ...sample, expiration: 65535 });
+    const forever = parseCapdMessage(mined({ ...base, expiration: 65535 }));
     expect(forever.ok).toBe(true);
     if (!forever.ok) return;
     expect(forever.message.expiration).toBeUndefined();
+  });
+
+  it("rejects messages whose work does not check out", () => {
+    expect(parseCapdMessage({ ...sample, data: "6868" }).ok).toBe(false);
+    expect(parseCapdMessage({ ...sample, hash: "0".repeat(64) }).ok).toBe(false);
+    const easy = { ...base, difficultyBits: 0x207fffff };
+    expect(parseCapdMessage(mined(easy)).ok).toBe(false);
   });
 
   it("rejects out-of-range created and caps the list", () => {
@@ -85,7 +105,7 @@ describe("pool sync planning", () => {
       "wss://example:20004",
       5_000,
     );
-    const kept = mergePulled([stamped], [], [HASH_A], 9_000);
+    const kept = mergePulled([stamped], [], [sample.hash], 9_000);
     expect(kept[0]?.inPool).toBe(false);
     expect(kept[0]?.firstSeen).toBe(5_000);
 
@@ -103,14 +123,14 @@ describe("pullPool", () => {
   it("loads capped messages and skips a hash that disappeared", async () => {
     const rpc = {
       info: async () => ({ size: 80, count: 3, minPriority: 0.1, maxPriority: 2, relayPriority: 0.4 }),
-      list: async () => [HASH_A, HASH_B, HASH_C],
+      list: async () => [HASH_A, binary.hash, HASH_C],
       get: async (hash: string) => {
         if (hash === HASH_C) throw Object.assign(new Error("no such CAPD message"), { code: -32004 });
-        return { ...sample, hash, data: hash === HASH_B ? "00ff" : "6869" };
+        return hash === binary.hash ? binary : { ...sample, hash };
       },
     };
     const pulled = await pullPool(rpc, "wss://node:20004", new Set(), new Set(), 10_000, 2);
-    expect(pulled.messages.map((message) => message.hash)).toEqual([HASH_B]);
+    expect(pulled.messages.map((message) => message.hash)).toEqual([binary.hash]);
     expect(pulled.skipped).toBe(1);
     expect(pulled.remaining).toBe(1);
     expect(pulled.departed).toEqual([]);

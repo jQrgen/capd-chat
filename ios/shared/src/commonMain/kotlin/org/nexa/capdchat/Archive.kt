@@ -24,6 +24,7 @@ data class StoredCapd(
     val firstSeen: Long,
     val lastSeen: Long,
     val kept: Boolean = false,
+    val rescind: String? = null,
 )
 
 @Serializable
@@ -78,6 +79,7 @@ class ChatArchive {
                 origin = "network",
                 firstSeen = nowMs,
                 lastSeen = nowMs,
+                rescind = message.rescind,
             ),
         )
         prune(nowMs)
@@ -88,19 +90,26 @@ class ChatArchive {
         if (index >= 0) messages[index] = messages[index].copy(kept = kept)
     }
 
-    /** Drops invalid and expired copies (unless kept), then the oldest beyond [MAX_STORED]. */
+    /** Local policy: drops invalid and expired copies (unless kept), then the oldest beyond the count and byte caps. */
     fun prune(nowMs: Long) {
         val now = nowMs / 1000
         messages.removeAll { it.server != DEMO_SERVER && !valid(it, now) }
-        if (messages.size > MAX_STORED) {
-            val drop = messages.filter { !it.kept }.sortedBy { it.lastSeen }.take(messages.size - MAX_STORED).toSet()
-            messages.removeAll { it in drop }
+        var bytes = messages.sumOf { it.data.length / 2L }
+        var count = messages.size
+        if (count <= MAX_STORED && bytes <= MAX_STORED_BYTES) return
+        val drop = HashSet<StoredCapd>()
+        for (m in messages.filter { !it.kept }.sortedBy { it.lastSeen }) {
+            if (count <= MAX_STORED && bytes <= MAX_STORED_BYTES) break
+            drop.add(m)
+            count--
+            bytes -= m.data.length / 2
         }
+        messages.removeAll { it in drop }
     }
 
     private fun valid(m: StoredCapd, now: Long): Boolean {
-        val expiration = if (m.kept) null else m.expiration
-        return capdAcceptable(m.hash, m.difficultyBits, m.created, expiration, m.size, m.data, now)
+        return m.size == m.data.length / 2 &&
+            capdAcceptable(m.hash, m.difficultyBits, m.created, m.expiration, m.rescind, m.data, m.nonce, now, m.kept)
     }
 
     fun markOffline(server: String) {
@@ -199,5 +208,6 @@ class ChatArchive {
     companion object {
         const val DEMO_SERVER = "demo"
         const val MAX_STORED = 5000
+        const val MAX_STORED_BYTES = 16L * 1024 * 1024
     }
 }
