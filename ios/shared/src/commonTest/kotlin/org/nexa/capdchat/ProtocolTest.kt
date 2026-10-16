@@ -2,6 +2,7 @@ package org.nexa.capdchat
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -160,6 +161,65 @@ class ProtocolTest {
     }
 
     @Test
+    fun prefixQueryCommandIsCapdq() {
+        val peer = CapdPeer("mainnet", "seed:7228", 7228, prefixHex = "abcd", seed = 4)
+        peer.start(10)
+        peer.receive(remoteVersion(), 10)
+        peer.receive(theirExtversion(), 10)
+        val ready = peer.receive(frame(Net.MAINNET_MAGIC, Net.VERACK, 1, ByteArray(0)), 10)
+        val queries = ready.send.filter { commandOf(it) == Net.CAPDQUERY }
+        assertEquals("capdq", Net.CAPDQUERY)
+        assertEquals(2, queries.size)
+        assertEquals("636170647100000000000000", hexEncode(queries[0].copyOfRange(4, 16)))
+        assertTrue(ready.send.none { commandOf(it) == "capdquery" })
+    }
+
+    @Test
+    fun queryReplyRejectsCountsAboveTheProtocolMaxOrTheBytesLeft() {
+        assertFailsWith<WireException> {
+            decodeQueryReply(queryReply(Net.QUERY_HASH, 2_001u, ByteArray(0)), 0)
+        }
+        assertFailsWith<WireException> {
+            decodeQueryReply(queryReply(Net.QUERY_HASH, 2u, ByteArray(10)), 0)
+        }
+        assertFailsWith<WireException> {
+            decodeQueryReply(queryReply(Net.QUERY_MSG, 201u, ByteArray(0)), 0)
+        }
+        assertFailsWith<WireException> {
+            decodeQueryReply(queryReply(Net.QUERY_MSG, 2u, ByteArray(Net.MIN_CAPD_MSG)), 0)
+        }
+        val huge = Buf().apply {
+            u32(1)
+            u8(Net.QUERY_HASH)
+            u32(1)
+            u8(0xff)
+            repeat(8) { u8(0xff) }
+        }.toByteArray()
+        val error = assertFailsWith<WireException> { decodeQueryReply(huge, 0) }
+        assertTrue(error.message!!.contains("exceeds"))
+
+        val body = CapdBody(
+            createTime = 1_700_000_000,
+            expiration = null,
+            rescind = null,
+            data = "ok".encodeToByteArray(),
+            difficultyBits = 0x1e0fffff,
+            nonce = byteArrayOf(1),
+        )
+        val accepted = decodeQueryReply(queryReply(Net.QUERY_MSG, 1u, encodeCapd(body)), 1_700_000_000)
+        assertEquals("ok", accepted.messages.single().text)
+        val peer = CapdPeer("mainnet", "seed:7228", 7228, seed = 9)
+        finish(peer)
+        val step = peer.receive(
+            frame(Net.MAINNET_MAGIC, Net.CAPDQREPLY, 4, queryReply(Net.QUERY_HASH, 2_001u, ByteArray(0))),
+            10,
+        )
+        assertEquals("listening", step.phase)
+        assertTrue(step.messages.isEmpty())
+        assertTrue(step.note.contains("exceeds"))
+    }
+
+    @Test
     fun prefixMustBeALegalWidth() {
         assertNull(prefixBytes("aa"))
         assertEquals(2, prefixBytes("abcd")!!.size)
@@ -191,6 +251,16 @@ class ProtocolTest {
         8,
         encodeExtversion(mapOf(Net.BU_CAPD_VERSION to 1uL, Net.EXT_VERSION_KEY to 100uL)),
     )
+
+    private fun commandOf(frame: ByteArray): String = commandName(frame.copyOfRange(4, 16))
+
+    private fun queryReply(type: Int, count: ULong, body: ByteArray): ByteArray = Buf().apply {
+        u32(1)
+        u8(type)
+        u32(count.toLong())
+        compact(count)
+        bytes(body)
+    }.toByteArray()
 
     private fun payloadOf(frame: ByteArray): ByteArray {
         val length = Reader(frame.copyOfRange(16, 20)).u32().toInt()

@@ -20,7 +20,15 @@ jobs:
         working-directory: ios
 
   # jQrgen's Mac mini (Apple Silicon, Xcode). A later TestFlight upload uses this same runner.
+  # Fork pull requests must not run here: the job checks out the PR and executes it on a
+  # persistent machine. Same-repo pull requests are allowed. Do not switch this job to
+  # pull_request_target; that would run fork code with this repository's token.
   ios:
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, macOS, jqrgen-mac]
     timeout-minutes: 60
     concurrency:

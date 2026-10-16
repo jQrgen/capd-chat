@@ -14,7 +14,7 @@ This app only needs to listen. The CAPD wire format is pure serialization, so `i
 - `version` addresses are 26 bytes: services, 16-byte IPv4-mapped IP, big-endian port. Time is Unix seconds. Relay is off, and the only service bit advertised is `NODE_EXTVERSION`. (`src/net.cpp` `PushVersion`, `src/protocol.h` `CAddress`)
 - `extversion` is a compact map. Values are themselves compact integers. CAPD is enabled on the peer only when `BU_CAPD_VERSION` (`0x000000020000000e`) is non-zero. (`src/extversionmessage.cpp`, `CNode::ReadConfigFromExtversion`)
 - A CAPD message hash is `SHA256(SHA256(SHA256(preimage) || nonce))`, displayed reversed, matching `CapdMsg::CalcHash`. The preimage uses expiration `65535` when the field is omitted. (`src/capd/capdmsg.cpp`)
-- There is no “every message” query. The app asks the peer to inventory new messages (`capdgetmsg` with priority 0) and, if you enter a 2, 4, 8, or 16 byte prefix, installs a `capdquery` notify for that prefix.
+- There is no “every message” query. The app asks the peer to inventory new messages (`capdgetmsg` with priority 0) and, if you enter a 2, 4, 8, or 16 byte prefix, installs a `capdq` notify for that prefix. The node’s command is `capdq`, not `capdquery`.
 
 ## Layout
 
@@ -43,7 +43,7 @@ GitHub Actions splits the work. `.github/workflows/pages.yml` and the JVM protoc
 runs-on: [self-hosted, macOS, jqrgen-mac]
 ```
 
-That job runs `iosSimulatorArm64Test`, then `xcodebuild` for the iOS Simulator and for a generic iOS device, with code signing turned off. A later TestFlight upload should use the same runner.
+That job runs `iosSimulatorArm64Test`, then `xcodebuild` for the iOS Simulator and for a generic iOS device, with code signing turned off. It runs on a push to `main`, on a manual dispatch, or on a pull request whose head repository is this one. A fork pull request does not schedule it. A later TestFlight upload should use the same runner and the same gate. Do not move it to `pull_request_target`.
 
 ## Build on a Mac
 

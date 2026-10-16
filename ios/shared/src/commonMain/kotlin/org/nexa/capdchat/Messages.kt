@@ -38,6 +38,12 @@ internal object Net {
     const val QUERY_HASH = 2
     const val QUERY_ERROR = 3
     const val QUERY_NOTIFY = 0x80
+    /** Node cap on a capdqreply of full messages (`CAPD_QUERY_MAX_MSGS`). */
+    const val QUERY_MAX_MSGS = 200
+    /** Node cap on a capdqreply of hashes (`CAPD_QUERY_MAX_INVS`). */
+    const val QUERY_MAX_HASHES = 2000
+    /** Smallest CapdMsg on the wire: fields, time, bits, empty nonce, empty data. */
+    const val MIN_CAPD_MSG = 15
     const val EXT_VERSION_KEY = 0uL
     const val EXT_VERSION_VALUE = 100uL
     const val BU_IGNORE_CHECKSUM = 0x0000000200000002uL
@@ -55,7 +61,7 @@ internal object Net {
     const val CAPDMSG = "capdmsg"
     const val CAPDGETINFO = "capdgetinfo"
     const val CAPDINFO = "capdinfo"
-    const val CAPDQUERY = "capdquery"
+    const val CAPDQUERY = "capdq"
     const val CAPDQREPLY = "capdqreply"
     const val CAPDREMOVE = "capdremove"
     const val REJECT = "reject"
@@ -264,16 +270,35 @@ internal fun decodeQueryReply(payload: ByteArray, nowSeconds: Long): QueryReply 
     val kind = type and 0x7f
     return when (kind) {
         Net.QUERY_HASH -> {
-            val count = reader.compact()
-            val hashes = List(count.toInt()) { reader.bytes(32) }
+            val count = boundedCount(reader.compact(), Net.QUERY_MAX_HASHES, reader.remaining(), 32)
+            val hashes = ArrayList<ByteArray>(count)
+            repeat(count) { hashes.add(reader.bytes(32)) }
             QueryReply(cookie, type, emptyList(), hashes, null)
         }
         else -> {
-            val count = if (reader.remaining() == 0) 0uL else reader.compact()
-            val messages = List(count.toInt()) { decodeCapd(reader, nowSeconds) }
+            val count = if (reader.remaining() == 0) {
+                0
+            } else {
+                boundedCount(reader.compact(), Net.QUERY_MAX_MSGS, reader.remaining(), Net.MIN_CAPD_MSG)
+            }
+            val messages = ArrayList<DecodedCapd>(count)
+            repeat(count) { messages.add(decodeCapd(reader, nowSeconds)) }
             QueryReply(cookie, type, messages, emptyList(), null)
         }
     }
+}
+
+/**
+ * A peer-supplied count is only turned into a list after it is within the
+ * protocol maximum and the bytes still in the frame can hold that many items.
+ * `List(count.toInt())` on a raw compact size will allocate before either check,
+ * and a size above [Int.MAX_VALUE] becomes a negative [Int].
+ */
+internal fun boundedCount(count: ULong, max: Int, remaining: Int, stride: Int): Int {
+    if (count > max.toULong()) throw WireException("count $count exceeds $max")
+    val room = if (remaining <= 0) 0L else remaining.toLong() / stride.toLong()
+    if (count > room.toULong()) throw WireException("count $count does not fit in $remaining bytes")
+    return count.toInt()
 }
 
 internal fun decodeInv(payload: ByteArray): List<ByteArray> {
