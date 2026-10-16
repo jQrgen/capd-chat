@@ -78,8 +78,8 @@ internal object Net {
 }
 
 /**
- * Client-side safety limits and local policy, applied after a frame parses at node limits.
- * Excess is dropped, not treated as a malformed frame.
+ * Client-side safety limits and local policy. Frames parse at node limits; items past these
+ * caps are skipped during decoding without being created, and are not treated as malformed.
  */
 internal object ClientLimits {
     const val MAX_INV = 2000
@@ -110,6 +110,7 @@ internal fun frame(magic: ByteArray, command: String, cookie: Long, payload: Byt
 
 internal class FrameParser(private val magic: ByteArray) {
     private var pending = ByteArray(0)
+    val buffered: Int get() = pending.size
 
     fun push(chunk: ByteArray): List<Frame> {
         if (chunk.isEmpty()) return emptyList()
@@ -261,7 +262,21 @@ internal fun decodeCapd(reader: Reader, nowSeconds: Long): DecodedCapd {
 internal fun decodeCapdVector(payload: ByteArray, nowSeconds: Long): List<DecodedCapd> {
     val reader = Reader(payload)
     val count = boundedCount(reader.compact(), Net.MAX_MSG_VECTOR, reader.remaining(), Net.MIN_CAPD_MSG)
-    return List(count) { decodeCapd(reader, nowSeconds) }
+    val kept = minOf(count, ClientLimits.MAX_MSG_VECTOR)
+    val out = List(kept) { decodeCapd(reader, nowSeconds) }
+    repeat(count - kept) { skipCapd(reader) }
+    return out
+}
+
+/** Validates one CapdMsg's layout without allocating it. */
+private fun skipCapd(reader: Reader) {
+    val fields = reader.u8()
+    if (fields and 3.inv() != 0) throw WireException("unknown CAPD fields $fields")
+    reader.skip(12)
+    reader.skipVector(64)
+    if (fields and 1 != 0) reader.skip(2)
+    if (fields and 2 != 0) reader.skip(20)
+    reader.skipVector(Net.MAX_PAYLOAD)
 }
 
 internal fun encodeQuery(cookie: Long, type: Int, start: Long, quantity: Long, content: ByteArray): ByteArray =
@@ -336,7 +351,9 @@ internal fun decodeInv(payload: ByteArray): List<ByteArray> {
     val type = reader.compact()
     if (type != Net.CAPD_MSG_TYPE.toULong()) return emptyList()
     val count = boundedCount(reader.compact(), Net.MAX_INV, reader.remaining(), 32)
-    return List(count) { reader.bytes(32) }
+    val out = List(minOf(count, ClientLimits.MAX_INV)) { reader.bytes(32) }
+    reader.skip((count - out.size) * 32)
+    return out
 }
 
 /** `CapdMsg::DoesPowMeetTarget`: the hash recomputed from the body is strictly below the target. */

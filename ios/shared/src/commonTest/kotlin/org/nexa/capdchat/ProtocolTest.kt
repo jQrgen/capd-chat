@@ -315,6 +315,31 @@ class ProtocolTest {
         assertEquals(ClientLimits.MAX_INV.toULong(), Reader(get.copyOfRange(8, get.size)).compact())
     }
 
+    @Test
+    fun decodersStopCreatingItemsAtClientLimits() {
+        val one = encodeCapd(CapdBody(1_700_000_000, 60, null, "x".encodeToByteArray(), 0x1e0fffff, byteArrayOf(0)))
+        val many = Buf().apply { compact(Net.MAX_MSG_VECTOR.toULong()); repeat(Net.MAX_MSG_VECTOR) { bytes(one) } }.toByteArray()
+        assertEquals(ClientLimits.MAX_MSG_VECTOR, decodeCapdVector(many, 1_700_000_000).size)
+        val broken = many.copyOf(many.size - 1)
+        assertFailsWith<WireException> { decodeCapdVector(broken, 1_700_000_000) }
+        val inv = Buf().apply {
+            compact(Net.CAPD_MSG_TYPE.toULong())
+            compact(Net.MAX_INV.toULong())
+            bytes(ByteArray(Net.MAX_INV * 32))
+        }.toByteArray()
+        assertEquals(ClientLimits.MAX_INV, decodeInv(inv).size)
+        assertFailsWith<WireException> { decodeInv(inv.copyOf(inv.size - 1)) }
+    }
+
+    @Test
+    fun claimedLengthAloneDoesNotGrowTheBuffer() {
+        val parser = FrameParser(Net.MAINNET_MAGIC)
+        val header = frame(Net.MAINNET_MAGIC, Net.CAPDMSG, 1, ByteArray(0))
+        Buf().apply { u32(Net.MAX_PAYLOAD.toLong()) }.toByteArray().copyInto(header, 16)
+        assertTrue(parser.push(header).isEmpty())
+        assertEquals(Net.HEADER_SIZE, parser.buffered)
+    }
+
     private fun CapdBody.mined(): CapdBody {
         val target = compactTargetHex(difficultyBits)
         var n = 0
