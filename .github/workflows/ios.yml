@@ -1,0 +1,73 @@
+name: iOS peer
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Protocol checks do not need Xcode. The website workflow stays on ubuntu-latest too.
+  protocol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: ./gradlew :shared:jvmTest --no-daemon
+        working-directory: ios
+
+  # jQrgen's Mac mini (Apple Silicon, Xcode). A later TestFlight upload uses this same runner.
+  # Fork pull requests must not run here: the job checks out the PR and executes it on a
+  # persistent machine. Same-repo pull requests are allowed. Do not switch this job to
+  # pull_request_target; that would run fork code with this repository's token.
+  ios:
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, macOS, jqrgen-mac]
+    timeout-minutes: 60
+    concurrency:
+      group: capd-chat-ios-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Xcode and simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun simctl list devices available
+          if ! xcrun simctl list devices available | grep -q 'iPhone'; then
+            devtype=$(xcrun simctl list devicetypes | awk -F'[()]' '/iPhone/ { print $(NF-1); exit }')
+            runtime=$(xcrun simctl list runtimes available | awk '/iOS/ { id = $NF } END { print id }')
+            xcrun simctl create "CAPD iPhone" "$devtype" "$runtime"
+          fi
+      - name: Shared tests on the iOS simulator
+        shell: bash
+        working-directory: ios
+        run: ./gradlew :shared:iosSimulatorArm64Test --no-daemon
+      - name: Build CapdChat for the simulator and for a device
+        shell: bash
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          for destination in 'generic/platform=iOS Simulator' 'generic/platform=iOS'; do
+            xcodebuild \
+              -project CapdChat/CapdChat.xcodeproj \
+              -scheme CapdChat \
+              -configuration Debug \
+              -destination "$destination" \
+              -derivedDataPath "${RUNNER_TEMP}/DerivedData-${destination//\//-}" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              build
+          done

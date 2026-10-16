@@ -1,0 +1,10 @@
+node_modules
+dist
+.DS_Store
+*.local
+.vite
+ios/.gradle/
+ios/build/
+ios/shared/build/
+ios/**/xcuserdata/
+*.xcuserstate
