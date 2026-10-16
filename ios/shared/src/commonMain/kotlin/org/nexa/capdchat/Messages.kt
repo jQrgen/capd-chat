@@ -33,7 +33,11 @@ internal object Net {
     const val PROTOCOL_VERSION = 80008
     const val NODE_EXTVERSION = 1L shl 11
     const val HEADER_SIZE = 24
-    const val MAX_PAYLOAD = 2 * 1024 * 1024
+    /** Node `GetMaxAllowedNetMessage()` at default settings: (1 MB + 2 MB next max block) * 2. */
+    const val MAX_PAYLOAD = 6_000_000
+    /** Node `CAPD_MAX_INV_TO_SEND` and `CAPD_MAX_MSG_TO_SEND`. */
+    const val MAX_INV = 20_000
+    const val MAX_MSG_VECTOR = 5000
     const val MAX_PING = 8
     const val CAPD_MSG_TYPE = 72
     const val QUERY_MSG = 1
@@ -74,8 +78,8 @@ internal object Net {
 }
 
 /**
- * Client-side safety limits and local policy. These are tighter than the node
- * (capdinv 20000, capdmsg 5000, data up to GetMaxAllowedNetMessage) and are not protocol rules.
+ * Client-side safety limits and local policy, applied after a frame parses at node limits.
+ * Excess is dropped, not treated as a malformed frame.
  */
 internal object ClientLimits {
     const val MAX_INV = 2000
@@ -109,18 +113,18 @@ internal class FrameParser(private val magic: ByteArray) {
 
     fun push(chunk: ByteArray): List<Frame> {
         if (chunk.isEmpty()) return emptyList()
+        if (pending.size < Net.HEADER_SIZE && pending.size + chunk.size >= Net.HEADER_SIZE) {
+            payloadLength(pending + chunk.copyOf(Net.HEADER_SIZE - pending.size))
+        }
         pending = pending + chunk
         val frames = ArrayList<Frame>()
         while (pending.size >= Net.HEADER_SIZE) {
-            if (!pending.copyOfRange(0, 4).contentEquals(magic)) {
-                throw WireException("message did not start with the ${hexEncode(magic)} network magic")
-            }
+            val length = payloadLength(pending)
             val reader = Reader(pending)
             reader.bytes(4)
             val command = commandName(reader.bytes(12))
-            val length = reader.u32()
+            reader.u32()
             val cookie = reader.u32()
-            if (length < 0 || length > Net.MAX_PAYLOAD) throw WireException("message length $length is not usable")
             val total = Net.HEADER_SIZE + length.toInt()
             if (pending.size < total) break
             val payload = pending.copyOfRange(Net.HEADER_SIZE, total)
@@ -128,6 +132,15 @@ internal class FrameParser(private val magic: ByteArray) {
             pending = pending.copyOfRange(total, pending.size)
         }
         return frames
+    }
+
+    private fun payloadLength(header: ByteArray): Long {
+        if (!header.copyOfRange(0, 4).contentEquals(magic)) {
+            throw WireException("message did not start with the ${hexEncode(magic)} network magic")
+        }
+        val length = Reader(header.copyOfRange(16, 20)).u32()
+        if (length < 0 || length > Net.MAX_PAYLOAD) throw WireException("message length $length is not usable")
+        return length
     }
 }
 
@@ -219,7 +232,7 @@ internal fun decodeCapd(reader: Reader, nowSeconds: Long): DecodedCapd {
     val nonce = reader.vector(64)
     val expiration = if (fields and 1 != 0) reader.u16() else NEVER_EXPIRE
     val rescind = if (fields and 2 != 0) reader.bytes(20) else null
-    val data = reader.vector(ClientLimits.MAX_CAPD_DATA)
+    val data = reader.vector(Net.MAX_PAYLOAD)
     val body = CapdBody(
         createTime = created,
         expiration = if (expiration == NEVER_EXPIRE) null else expiration,
@@ -247,7 +260,7 @@ internal fun decodeCapd(reader: Reader, nowSeconds: Long): DecodedCapd {
 
 internal fun decodeCapdVector(payload: ByteArray, nowSeconds: Long): List<DecodedCapd> {
     val reader = Reader(payload)
-    val count = boundedCount(reader.compact(), ClientLimits.MAX_MSG_VECTOR, reader.remaining(), Net.MIN_CAPD_MSG)
+    val count = boundedCount(reader.compact(), Net.MAX_MSG_VECTOR, reader.remaining(), Net.MIN_CAPD_MSG)
     return List(count) { decodeCapd(reader, nowSeconds) }
 }
 
@@ -322,7 +335,7 @@ internal fun decodeInv(payload: ByteArray): List<ByteArray> {
     val reader = Reader(payload)
     val type = reader.compact()
     if (type != Net.CAPD_MSG_TYPE.toULong()) return emptyList()
-    val count = boundedCount(reader.compact(), ClientLimits.MAX_INV, reader.remaining(), 32)
+    val count = boundedCount(reader.compact(), Net.MAX_INV, reader.remaining(), 32)
     return List(count) { reader.bytes(32) }
 }
 

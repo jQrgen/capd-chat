@@ -288,6 +288,33 @@ class ProtocolTest {
         assertTrue(peer.receive(frame(Net.MAINNET_MAGIC, Net.PING, 2, ByteArray(9)), 10).send.isEmpty())
     }
 
+    @Test
+    fun nodeSizedFramesParseAndClientLimitsOnlyFilter() {
+        val peer = CapdPeer("mainnet", "seed:7228", 7228, seed = 10)
+        finish(peer)
+        val big = CapdBody(1_700_000_000, null, null, ByteArray(100 * 1024), 0x1e0fffff, byteArrayOf(0))
+        val msg = frame(Net.MAINNET_MAGIC, Net.CAPDMSG, 2, Buf().apply { compact(1u); bytes(encodeCapd(big)) }.toByteArray())
+        val inv = frame(
+            Net.MAINNET_MAGIC,
+            Net.CAPDINV,
+            3,
+            Buf().apply {
+                compact(Net.CAPD_MSG_TYPE.toULong())
+                compact(Net.MAX_INV.toULong())
+                repeat(Net.MAX_INV) { bytes(ByteArray(28) + Buf().apply { u32(it.toLong()) }.toByteArray()) }
+            }.toByteArray(),
+        )
+        repeat(Net.MAX_PARSE_FAILURES) {
+            val got = peer.receive(msg, 1_700_000_000)
+            assertEquals("listening", got.phase)
+            assertTrue(got.messages.isEmpty())
+        }
+        val asked = peer.receive(inv, 1_700_000_000)
+        assertEquals("listening", asked.phase)
+        val get = payloadOf(asked.send.single())
+        assertEquals(ClientLimits.MAX_INV.toULong(), Reader(get.copyOfRange(8, get.size)).compact())
+    }
+
     private fun CapdBody.mined(): CapdBody {
         val target = compactTargetHex(difficultyBits)
         var n = 0

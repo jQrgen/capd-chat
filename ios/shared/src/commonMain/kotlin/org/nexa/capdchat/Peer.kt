@@ -75,7 +75,7 @@ class CapdPeer(
                         }
                         Net.CAPDINFO -> onInfo(frame.payload)
                         Net.CAPDINV -> onInv(frame.payload, outgoing)
-                        Net.CAPDMSG -> found.addAll(takeNew(decodeCapdVector(frame.payload, nowSeconds), nowSeconds))
+                        Net.CAPDMSG -> found.addAll(takeNew(decodeCapdVector(frame.payload, nowSeconds).take(ClientLimits.MAX_MSG_VECTOR), nowSeconds))
                         Net.CAPDQREPLY -> onReply(frame.payload, nowSeconds, outgoing, found)
                         Net.REJECT -> noteText = rejectReason(frame.payload)
                     }
@@ -229,7 +229,7 @@ class CapdPeer(
     }
 
     private fun onInv(payload: ByteArray, outgoing: MutableList<ByteArray>) {
-        val hashes = decodeInv(payload)
+        val hashes = decodeInv(payload).take(ClientLimits.MAX_INV)
         if (seen.size > MAX_SEEN) seen.clear()
         val fresh = hashes.filter { seen.add(hexEncode(it)) }
         if (fresh.isNotEmpty()) outgoing.add(send(Net.CAPDGETMSG, encodeGetMsg(0.0, fresh)))
