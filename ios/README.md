@@ -26,16 +26,24 @@ This app only needs to listen. The CAPD wire format is pure serialization, so `i
 
 The website at the repository root is unchanged.
 
-## Tests on Linux or CI
+## Tests
 
-JDK 17 or newer:
+JDK 17 or newer, on Linux or on the Mac:
 
 ```sh
 cd ios
 ./gradlew :shared:jvmTest
 ```
 
-Apple frameworks are registered only when Gradle is running on macOS. `jvmTest` is the check that runs here and in GitHub Actions.
+Apple frameworks are registered only when Gradle is running on macOS. On a Mac, `./gradlew :shared:iosSimulatorArm64Test` runs the same protocol tests in the iOS simulator.
+
+GitHub Actions splits the work. `.github/workflows/pages.yml` and the JVM protocol job stay on `ubuntu-latest`. The iOS build and simulator tests run on jQrgen's Mac mini:
+
+```yaml
+runs-on: [self-hosted, macOS, jqrgen-mac]
+```
+
+That job runs `iosSimulatorArm64Test`, then `xcodebuild` for the iOS Simulator and for a generic iOS device, with code signing turned off. A later TestFlight upload should use the same runner.
 
 ## Build on a Mac
 
@@ -58,5 +66,7 @@ User script sandboxing is off so Gradle can write the framework next to the proj
 7. Export compliance is already answered in the generated Info.plist (`ITSAppUsesNonExemptEncryption = NO`). The app uses TCP and SHA-256 for message identity. It does not implement its own encryption.
 
 External TestFlight adds Apple’s beta review. Internal testing is enough for a first install.
+
+When upload is automated, that job should use `runs-on: [self-hosted, macOS, jqrgen-mac]`, the same runner as the iOS build. It needs the Apple credentials kept on the Mac, not in the repository.
 
 This repository was prepared on Linux, so the Xcode archive and an on-device screenshot were not produced here. The protocol tests, including a live handshake to a mainnet seed when port 7228 is reachable, are the check that runs in this environment.
