@@ -11,7 +11,7 @@ CAPD (Counterparty and Protocol Discovery) is a short-lived message pool on Nexa
 - See each message with its timestamp, priority, initial priority, and difficulty (`nBits`). UTF-8 text is shown as text. Any other payload is shown as hex.
 - Search text, hex, or a message hash, and filter to text, hex, messages still in the pool, or messages only kept locally.
 - Receive new messages with `capd.subscribe` when the server offers it. Otherwise the page polls `capd.list` every 4 seconds.
-- Pick a server, including `wss://electrum.nexa.org:20004`, or type a `ws://` / `wss://` URL. A bare host uses port 20004.
+- Pick a server. The list includes Nordic Crypto’s own Rostrum at `wss://electrum-nexa.nordiccrypto.no:20004` (Hetzner, `91.99.122.75`) and `wss://electrum.nexa.org:20004`, or a typed `ws://` / `wss://` URL. A bare host uses port 20004. A first visit opens the demo pool.
 
 The feed is oldest at the top and newest at the bottom.
 
@@ -29,7 +29,7 @@ The client speaks the read-only CAPD methods from [Rostrum MR !544](https://gitl
 
 `capd.subscribe` is not in that merge request. The page calls it anyway. JSON-RPC `-32601` (or any other subscribe failure while the socket is still up) switches the page to polling. A later server can notify with `capd.subscribe` and a hash, a list of hashes, or a `capd.get` object.
 
-Public Rostrum 14.0.1 at `electrum.nexa.org` answers `server.version` and rejects `capd.info` as an unknown method. The page says so and offers the demo pool. CAPD reads are aimed at Rostrum 15.
+Nordic Crypto’s Nexa server and the public server at `electrum.nexa.org` both answer `server.version` as Rostrum 14.0.1 and reject `capd.info` as an unknown method. The page says so and offers the demo pool. CAPD reads are aimed at a Rostrum build that includes [MR !544](https://gitlab.com/nexa/rostrum/-/merge_requests/544).
 
 `capd.list` is treated as a full snapshot only when its length matches `capd.info`’s count. A shorter list means the lowest-priority hashes were omitted, so missing hashes are not marked as gone.
 

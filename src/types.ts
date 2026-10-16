@@ -37,7 +37,7 @@ export type CapdInfo = {
   relayPriority: number;
 };
 
-export type ServerPreset = "demo" | "nexa" | "custom";
+export type ServerPreset = "demo" | "nordic" | "nexa" | "custom";
 
 export type Settings = {
   preset: ServerPreset;
@@ -49,6 +49,9 @@ export type Settings = {
 };
 
 export const DEMO_SERVER = "demo";
+
+/** Nordic Crypto's Nexa Rostrum on the Hetzner host 91.99.122.75. */
+export const NORDIC_ROSTRUM = "wss://electrum-nexa.nordiccrypto.no:20004";
 
 export const NEXA_ROSTRUM = "wss://electrum.nexa.org:20004";
 
