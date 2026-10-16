@@ -148,12 +148,13 @@ internal fun versionServices(payload: ByteArray): Long {
 }
 
 internal fun encodeExtversion(entries: Map<ULong, ULong>): ByteArray {
-    val ordered = entries.toSortedMap()
+    // std::map sends keys in ascending order. toSortedMap is JVM-only.
+    val ordered = entries.keys.sorted()
     return Buf().apply {
         compact(ordered.size.toULong())
-        for ((key, value) in ordered) {
+        for (key in ordered) {
             compact(key)
-            val packed = Buf().apply { compact(value) }.toByteArray()
+            val packed = Buf().apply { compact(entries.getValue(key)) }.toByteArray()
             vector(packed)
         }
     }.toByteArray()
